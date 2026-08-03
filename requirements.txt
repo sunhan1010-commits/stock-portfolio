@@ -1,0 +1,7 @@
+PySide6
+yfinance
+finance-datareader
+pykrx
+pandas
+requests
+certifi

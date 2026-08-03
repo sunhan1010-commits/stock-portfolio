@@ -1,0 +1,14 @@
+# 가상환경 / 빌드 산출물
+.venv/
+build/
+dist/
+installer_output/
+__pycache__/
+*.pyc
+
+# 개인 데이터 / 로컬 생성물 (커밋 금지)
+portfolio.db
+cacert.pem
+winca.pem
+crash.log
+*.spec
