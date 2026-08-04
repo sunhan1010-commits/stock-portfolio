@@ -10,9 +10,16 @@ $dist = Join-Path $work "dist"
 Write-Host "== 1) PyInstaller 준비 ==" -ForegroundColor Cyan
 & $py -m pip install --quiet --upgrade pyinstaller
 
+Write-Host "== 1b) 버전 리소스 생성(백신 오탐/게시자표시 완화) ==" -ForegroundColor Cyan
+New-Item -ItemType Directory -Force -Path $work | Out-Null
+$verInfo = Join-Path $work "version_info.txt"
+& $py "$PSScriptRoot\_versioninfo.py" "$verInfo"
+if (-not (Test-Path $verInfo)) { throw "version_info.txt 생성 실패" }
+
 Write-Host "== 2) 앱 빌드(PyInstaller onedir, 로컬) ==" -ForegroundColor Cyan
 & $py -m PyInstaller --noconfirm --clean --windowed --name StockPortfolio `
   --distpath "$dist" --workpath "$work\build" `
+  --version-file "$verInfo" `
   --collect-all curl_cffi `
   --collect-all FinanceDataReader `
   --collect-all pykrx `

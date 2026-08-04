@@ -19,7 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QColor, QPainter
 from PySide6.QtCharts import (
     QChart, QChartView, QLineSeries, QValueAxis, QDateTimeAxis,
-    QCandlestickSeries, QCandlestickSet, QBarCategoryAxis,
+    QCandlestickSeries, QCandlestickSet, QBarCategoryAxis, QAreaSeries,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
@@ -27,11 +27,12 @@ from PySide6.QtWidgets import (
     QHeaderView, QComboBox, QDoubleSpinBox, QSpinBox, QDialog, QDialogButtonBox,
     QFormLayout, QMessageBox, QFrame, QSizePolicy, QAbstractItemView, QPlainTextEdit,
     QCompleter, QTextBrowser, QCheckBox, QSplitter, QScrollArea,
-    QToolButton, QMenu, QTabBar, QInputDialog,
+    QToolButton, QMenu, QTabBar, QInputDialog, QStackedWidget,
 )
 
 import datasource
 import metrics
+import indicators
 import db
 import version
 import updater
@@ -1546,6 +1547,18 @@ class RealtimeTab(QWidget):
         prow.addStretch()
         rlay.addLayout(prow)
 
+        # 기술적 지표(선택) — 일봉 기간에서 가격에 오버레이 / RSI·MACD는 아래 보조창
+        self._ind_checks = {}
+        irow = QHBoxLayout(); irow.setSpacing(8)
+        irow.addWidget(QLabel("지표"))
+        for key in ("볼린저밴드", "이동평균", "일목균형표", "RSI", "MACD"):
+            cb = QCheckBox(key)
+            cb.stateChanged.connect(self._on_indicator_toggle)
+            self._ind_checks[key] = cb
+            irow.addWidget(cb)
+        irow.addStretch()
+        rlay.addLayout(irow)
+
         self.chart = QChart()
         self.chart.legend().hide()
         self.chart.setMargins(QMargins(4, 4, 4, 4))
@@ -1553,6 +1566,15 @@ class RealtimeTab(QWidget):
         self.chart_view.setRenderHint(QPainter.Antialiasing)
         self.chart_view.setMinimumHeight(240)
         rlay.addWidget(self.chart_view)
+
+        # 보조지표(RSI/MACD) 창 — 필요할 때만 표시
+        self.osc_chart = QChart()
+        self.osc_chart.setMargins(QMargins(4, 0, 4, 0))
+        self.osc_view = QChartView(self.osc_chart)
+        self.osc_view.setRenderHint(QPainter.Antialiasing)
+        self.osc_view.setMaximumHeight(150)
+        self.osc_view.setVisible(False)
+        rlay.addWidget(self.osc_view)
 
         # 액션 + 총평 + 지표 분석
         actrow = QHBoxLayout()
@@ -1936,16 +1958,33 @@ class RealtimeTab(QWidget):
                 f"{fmt_money(lp['price'], cur)}</span> "
                 f"<span style='color:{col}; font-weight:700'>"
                 f"{lp['change']:+,.2f} ({lp['change_pct']:+.2f}%)</span>")
+            overlay = any(self._ind_checks[k].isChecked()
+                          for k in ("볼린저밴드", "이동평균", "일목균형표"))
+            show_osc = (self._ind_checks["RSI"].isChecked()
+                        or self._ind_checks["MACD"].isChecked())
             if period == "당일":
                 self._draw_line(data, lp.get("prev_close"), col)
+                self._clear_osc()
+            elif overlay:
+                self._draw_price_indicators(data, col)
+                self._render_osc(data) if show_osc else self._clear_osc()
             elif period in ("5년", "전체"):
                 self._draw_hist_line(data, col)
+                self._render_osc(data) if show_osc else self._clear_osc()
             else:
                 self._draw_candles(data)
+                self._render_osc(data) if show_osc else self._clear_osc()
 
         def fail(msg):
             self.big.setText(f"차트 조회 실패: {msg}")
         run_async(self, job, done, fail)
+
+    def _on_indicator_toggle(self, *_):
+        # 지표 체크가 바뀌면 현재 종목/기간으로 다시 그린다
+        if getattr(self, "selected", None):
+            self._load_chart(*self.selected)
+        else:
+            self._clear_osc()
 
     def _clear_chart(self):
         self.chart.removeAllSeries()
@@ -2051,6 +2090,152 @@ class RealtimeTab(QWidget):
         self.chart.addAxis(axy, Qt.AlignLeft); series.attachAxis(axy)
         self.chart.setTitle(f"{data[0]['date']} ~ {data[-1]['date']}  (종가 {len(data)}일)")
         self.chart.setTitleFont(QFont("Malgun Gothic", 8))
+
+    # ---- 기술적 지표 오버레이/보조창 ----
+    def _draw_price_indicators(self, data, color_hex):
+        """가격을 종가 라인으로 그리고 볼밴/이동평균/일목균형표를 겹쳐 표시."""
+        self._clear_chart()
+        if not data:
+            return
+        self.chart.legend().show()
+        self.chart.legend().setAlignment(Qt.AlignBottom)
+        self.chart.legend().setFont(QFont("Malgun Gothic", 7))
+        dates = [d["date"] for d in data]
+        xs = [QDateTime.fromString(dt, "yyyy-MM-dd").toMSecsSinceEpoch() for dt in dates]
+        closes = [d["close"] for d in data]
+        highs = [d["high"] for d in data]
+        lows = [d["low"] for d in data]
+        allvals = list(closes)
+        attach = []
+
+        def add_line(name, ys, color, width=1, dashed=False, X=None):
+            s = QLineSeries(); s.setName(name)
+            for x, y in zip(X or xs, ys):
+                if y is not None:
+                    s.append(x, y)
+            pen = s.pen(); pen.setColor(QColor(color)); pen.setWidth(width)
+            if dashed:
+                pen.setStyle(Qt.DashLine)
+            s.setPen(pen)
+            self.chart.addSeries(s); attach.append(s)
+            return s
+
+        add_line("종가", closes, color_hex, 2)
+        axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(7)
+        axx.setLabelsFont(QFont("Malgun Gothic", 8))
+        axy = QValueAxis(); axy.setLabelsFont(QFont("Malgun Gothic", 8))
+        C = self._ind_checks
+        x_hi = xs[-1]
+
+        if C["볼린저밴드"].isChecked():
+            mid, up, lo = indicators.bollinger(closes)
+            add_line("BB상단", up, "#8250df", 1, True)
+            add_line("BB중심", mid, "#8250df", 1)
+            add_line("BB하단", lo, "#8250df", 1, True)
+            allvals += [v for v in up + lo if v is not None]
+        if C["이동평균"].isChecked():
+            add_line("MA20", indicators.sma(closes, 20), "#1a7f37", 1)
+            add_line("MA60", indicators.sma(closes, 60), "#bf8700", 1)
+        if C["일목균형표"].isChecked():
+            ich = indicators.ichimoku(highs, lows, closes)
+            shift = ich["shift"]
+            last = QDateTime.fromString(dates[-1], "yyyy-MM-dd")
+            fut = [last.addDays(k + 1).toMSecsSinceEpoch() for k in range(shift)]
+            xs_ext = xs + fut
+            x_hi = xs_ext[-1]
+
+            def shifted(vals):
+                out = [None] * len(xs_ext)
+                for i, v in enumerate(vals):
+                    j = i + shift
+                    if j < len(out):
+                        out[j] = v
+                return out
+            sA = QLineSeries(); sB = QLineSeries()
+            for x, y in zip(xs_ext, shifted(ich["spanA"])):
+                if y is not None:
+                    sA.append(x, y)
+            for x, y in zip(xs_ext, shifted(ich["spanB"])):
+                if y is not None:
+                    sB.append(x, y)
+            cloud = QAreaSeries(sA, sB); cloud.setName("구름")
+            cc = QColor("#8250df"); cc.setAlpha(45); cloud.setBrush(cc)
+            cpen = cloud.pen(); cpen.setColor(QColor("#8250df")); cpen.setWidth(0)
+            cloud.setPen(cpen)
+            self.chart.addSeries(cloud); attach.append(cloud)
+            add_line("전환선", ich["tenkan"], "#e16f24", 1)
+            add_line("기준선", ich["kijun"], "#0969da", 1)
+            allvals += [v for v in ich["spanA"] + ich["spanB"] if v is not None]
+
+        self.chart.addAxis(axx, Qt.AlignBottom)
+        axx.setRange(QDateTime.fromMSecsSinceEpoch(xs[0]),
+                     QDateTime.fromMSecsSinceEpoch(x_hi))
+        lo_v, hi_v = min(allvals), max(allvals)
+        pad = (hi_v - lo_v) * 0.08 or 1
+        axy.setRange(lo_v - pad, hi_v + pad)
+        self.chart.addAxis(axy, Qt.AlignLeft)
+        for s in attach:
+            s.attachAxis(axx); s.attachAxis(axy)
+        self.chart.setTitle(f"{dates[0]} ~ {dates[-1]}  · 지표 오버레이")
+        self.chart.setTitleFont(QFont("Malgun Gothic", 8))
+
+    def _render_osc(self, data):
+        """보조지표 창: RSI(우선) 또는 MACD."""
+        self.osc_chart.removeAllSeries()
+        for ax in list(self.osc_chart.axes()):
+            self.osc_chart.removeAxis(ax)
+        if not data or len(data) < 30:
+            self.osc_view.setVisible(False); return
+        dates = [d["date"] for d in data]
+        xs = [QDateTime.fromString(dt, "yyyy-MM-dd").toMSecsSinceEpoch() for dt in dates]
+        closes = [d["close"] for d in data]
+        C = self._ind_checks
+        self.osc_chart.legend().setVisible(True)
+        self.osc_chart.legend().setAlignment(Qt.AlignBottom)
+        self.osc_chart.legend().setFont(QFont("Malgun Gothic", 7))
+        axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(6)
+        axx.setLabelsFont(QFont("Malgun Gothic", 7))
+        self.osc_chart.addAxis(axx, Qt.AlignBottom)
+
+        def add(name, vals, color, width=1, dashed=False):
+            s = QLineSeries(); s.setName(name)
+            for x, y in zip(xs, vals):
+                if y is not None:
+                    s.append(x, y)
+            pen = s.pen(); pen.setColor(QColor(color)); pen.setWidth(width)
+            if dashed:
+                pen.setStyle(Qt.DashLine)
+            s.setPen(pen); self.osc_chart.addSeries(s); return s
+
+        if C["RSI"].isChecked():
+            r = indicators.rsi(closes)
+            s = add("RSI(14)", r, "#8250df", 1)
+            ay = QValueAxis(); ay.setRange(0, 100); ay.setTickCount(3)
+            ay.setLabelsFont(QFont("Malgun Gothic", 7))
+            self.osc_chart.addAxis(ay, Qt.AlignLeft); s.attachAxis(axx); s.attachAxis(ay)
+            for lvl, cl in ((70, "#cf222e"), (30, "#1f6feb")):
+                g = add(f"{lvl}", [lvl] * len(closes), cl, 1, True)
+                g.attachAxis(axx); g.attachAxis(ay)
+            self.osc_chart.setTitle("RSI(14) · 70↑ 과매수 / 30↓ 과매도")
+        elif C["MACD"].isChecked():
+            line, sig, _hist = indicators.macd(closes)
+            sl = add("MACD", line, "#0969da", 1)
+            ss = add("시그널", sig, "#e16f24", 1)
+            vv = [v for v in line + sig if v is not None]
+            m = (max(abs(min(vv)), abs(max(vv))) if vv else 1) or 1
+            ay = QValueAxis(); ay.setRange(-m, m); ay.setLabelsFont(QFont("Malgun Gothic", 7))
+            self.osc_chart.addAxis(ay, Qt.AlignLeft)
+            for s in (sl, ss):
+                s.attachAxis(axx); s.attachAxis(ay)
+            self.osc_chart.setTitle("MACD(12,26,9)")
+        self.osc_chart.setTitleFont(QFont("Malgun Gothic", 8))
+        self.osc_view.setVisible(True)
+
+    def _clear_osc(self):
+        self.osc_chart.removeAllSeries()
+        for ax in list(self.osc_chart.axes()):
+            self.osc_chart.removeAxis(ax)
+        self.osc_view.setVisible(False)
 
 
 # ============================ 종목 스크리너 탭 ============================
@@ -2299,55 +2484,208 @@ class ScreenerTab(QWidget):
 
 
 # ============================ 시장 지표 탭 ============================
+_ENERGY = {"CL=F", "BZ=F", "NG=F"}
+_METAL = {"GC=F", "SI=F", "HG=F", "PL=F", "PA=F"}
+
+
+def _market_catalog():
+    items = []
+    for name, key in datasource.MARKET_INDICES:
+        items.append({"kind": "index", "key": key, "name": name, "cat": "지수"})
+    for name, key in datasource.COMMODITIES:
+        cat = "에너지" if key in _ENERGY else ("금속" if key in _METAL else "농산물")
+        items.append({"kind": "commodity", "key": key, "name": name, "cat": cat})
+    return items
+
+
+class MiniChartCard(QFrame):
+    """대시보드 카드: 이름·현재값·등락 + 종가 스파크라인. 클릭 시 단일 상세로."""
+    def __init__(self, kind, key, name, on_click):
+        super().__init__()
+        self.kind, self.key, self.name, self._on_click = kind, key, name, on_click
+        self.setObjectName("mini")
+        self.setStyleSheet("QFrame#mini{border:1px solid #d0d7de; border-radius:8px;}")
+        self.setMinimumSize(210, 140); self.setCursor(Qt.PointingHandCursor)
+        v = QVBoxLayout(self); v.setContentsMargins(8, 6, 8, 6); v.setSpacing(2)
+        self.head = QLabel(name); self.head.setTextFormat(Qt.RichText)
+        self.head.setStyleSheet("font-size:12px;")
+        v.addWidget(self.head)
+        self.chart = QChart(); self.chart.legend().hide()
+        self.chart.setMargins(QMargins(0, 0, 0, 0))
+        self.chart.layout().setContentsMargins(0, 0, 0, 0)
+        self.cv = QChartView(self.chart); self.cv.setRenderHint(QPainter.Antialiasing)
+        self.cv.setMinimumHeight(84)
+        v.addWidget(self.cv, 1)
+
+    def mouseReleaseEvent(self, e):
+        if self._on_click:
+            self._on_click(self.kind, self.key)
+
+    def load(self, period):
+        self.head.setText(f"{self.name} · …")
+
+        def job():
+            lv = datasource.item_live(self.kind, self.key)
+            if period == "당일":
+                ys = [p for _t, p in datasource.item_intraday(self.kind, self.key)]
+            else:
+                ys = [c for _d, c in datasource.item_history(self.kind, self.key, period)]
+            return lv, ys
+
+        def done(res):
+            lv, ys = res
+            chg = lv.get("change") or 0
+            col = "#cf222e" if chg > 0 else ("#1f6feb" if chg < 0 else "#57606a")
+            price = lv.get("price") or (ys[-1] if ys else 0)
+            self.head.setText(
+                f"<b>{self.name}</b> "
+                f"<span style='color:{col}; font-weight:700'>{price:,.2f} "
+                f"({lv.get('change_pct', 0):+.2f}%)</span>")
+            self._spark(ys, col)
+
+        def fail(msg):
+            self.head.setText(f"{self.name} · 실패")
+        run_async(self, job, done, fail)
+
+    def _spark(self, ys, color_hex):
+        self.chart.removeAllSeries()
+        for ax in list(self.chart.axes()):
+            self.chart.removeAxis(ax)
+        if not ys:
+            return
+        step = max(1, len(ys) // 300)
+        ys = ys[::step]
+        s = QLineSeries()
+        for i, v in enumerate(ys):
+            s.append(i, v)
+        pen = s.pen(); pen.setColor(QColor(color_hex)); pen.setWidth(2); s.setPen(pen)
+        self.chart.addSeries(s)
+        axx = QValueAxis(); axx.setVisible(False)
+        self.chart.addAxis(axx, Qt.AlignBottom); s.attachAxis(axx)
+        ay = QValueAxis(); ay.setVisible(False)
+        lo, hi = min(ys), max(ys); pad = (hi - lo) * 0.08 or 1
+        ay.setRange(lo - pad, hi + pad)
+        self.chart.addAxis(ay, Qt.AlignLeft); s.attachAxis(ay)
+
+
 class MarketTab(QWidget):
     def __init__(self, main):
         super().__init__()
         self.main = main
+        self.catalog = _market_catalog()
+        self.cards = []
         lay = QVBoxLayout(self)
         bar = QHBoxLayout()
-        self.index = QComboBox()
-        self.index.addItems(["KOSPI", "KOSDAQ", "S&P500", "나스닥", "다우"])
-        self.index.currentTextChanged.connect(self._load)
+        self.mode = QComboBox(); self.mode.addItems(["그리드 대시보드", "단일 상세"])
+        self.mode.currentTextChanged.connect(self._switch_mode)
+        self.group = QComboBox()
+        self.group.addItems(["전체", "지수", "에너지", "금속", "농산물"])
+        self.group.currentTextChanged.connect(self._rebuild_grid)
+        self.item = QComboBox()
+        for it in self.catalog:
+            self.item.addItem(it["name"], (it["kind"], it["key"]))
+        self.item.currentIndexChanged.connect(lambda *_: self._load_single())
         self.period = QComboBox()
         self.period.addItems(["당일", "3개월", "1년", "3년", "5년", "전체"])
-        self.period.setCurrentText("당일")
-        self.period.currentTextChanged.connect(self._load)
-        rf = QPushButton("🔄"); rf.clicked.connect(self._load)
-        bar.addWidget(QLabel("지수")); bar.addWidget(self.index)
+        self.period.setCurrentText("3개월")
+        self.period.currentTextChanged.connect(self._reload)
+        rf = QPushButton("🔄"); rf.clicked.connect(self._reload)
+        bar.addWidget(QLabel("보기")); bar.addWidget(self.mode)
+        self.lbl_group = QLabel("분류"); bar.addWidget(self.lbl_group); bar.addWidget(self.group)
+        self.lbl_item = QLabel("종목"); bar.addWidget(self.lbl_item); bar.addWidget(self.item)
         bar.addWidget(QLabel("기간")); bar.addWidget(self.period)
         bar.addWidget(rf); bar.addStretch()
         lay.addLayout(bar)
 
-        self.stat = QLabel("불러오는 중…")
-        self.stat.setTextFormat(Qt.RichText)
-        lay.addWidget(self.stat)
+        self.stack = QStackedWidget()
+        self.grid_host = QWidget(); self.grid = QGridLayout(self.grid_host)
+        self.grid.setSpacing(8)
+        gscroll = QScrollArea(); gscroll.setWidgetResizable(True)
+        gscroll.setFrameShape(QFrame.NoFrame); gscroll.setWidget(self.grid_host)
+        self.stack.addWidget(gscroll)
+
+        single = QWidget(); sv = QVBoxLayout(single)
+        self.stat = QLabel("불러오는 중…"); self.stat.setTextFormat(Qt.RichText)
+        sv.addWidget(self.stat)
         self.chart = QChart(); self.chart.legend().hide()
         self.chart.setMargins(QMargins(4, 4, 4, 4))
         self.cv = QChartView(self.chart); self.cv.setRenderHint(QPainter.Antialiasing)
-        lay.addWidget(self.cv, 1)
-        note = QLabel("※ 국내(코스피·코스닥) + 미국(S&P500·나스닥·다우). ‘당일’은 분봉 실시간 그래프"
-                      "(점선=전일 종가), 그 외 기간은 일봉 추이. 국내 지수는 PER·EPS도 함께 표시, "
-                      "미국 지수는 무료 PER·EPS가 없어 추이만 보여줍니다. (무료 지연 시세)")
+        sv.addWidget(self.cv, 1)
+        self.stack.addWidget(single)
+        lay.addWidget(self.stack, 1)
+
+        note = QLabel("※ 지수(코스피·코스닥·S&P500·나스닥·다우) + 주요 원자재(WTI·브렌트·천연가스·금·은·구리·"
+                      "백금·팔라듐·곡물 등). ‘그리드’는 여러 종목을 한눈에(카드 클릭=상세), ‘당일’은 분봉. "
+                      "두바이유는 무료 시세가 없어 브렌트로 대체합니다. (무료 지연 시세)")
         note.setWordWrap(True); note.setStyleSheet("color:#8b949e; font-size:11px;")
         lay.addWidget(note)
         self._loaded = False
+        self._switch_mode(self.mode.currentText())
 
     def showEvent(self, e):
         super().showEvent(e)
         if not self._loaded:
             self._loaded = True
-            self._load()
+            self._reload()
 
-    def _load(self, *_):
-        idx = self.index.currentText(); period = self.period.currentText()
+    def _switch_mode(self, text):
+        grid = (text == "그리드 대시보드")
+        self.stack.setCurrentIndex(0 if grid else 1)
+        self.lbl_group.setVisible(grid); self.group.setVisible(grid)
+        self.lbl_item.setVisible(not grid); self.item.setVisible(not grid)
+        if self._loaded:
+            self._reload()
+
+    def _reload(self, *_):
+        if self.mode.currentText() == "그리드 대시보드":
+            self._rebuild_grid()
+        else:
+            self._load_single()
+
+    def _filtered_items(self):
+        g = self.group.currentText()
+        return [it for it in self.catalog if g == "전체" or it["cat"] == g]
+
+    def _rebuild_grid(self, *_):
+        for c in self.cards:
+            c.setParent(None); c.deleteLater()
+        self.cards = []
+        while self.grid.count():
+            w = self.grid.takeAt(0).widget()
+            if w:
+                w.setParent(None)
+        period = self.period.currentText()
+        cols = 4
+        for i, it in enumerate(self._filtered_items()):
+            card = MiniChartCard(it["kind"], it["key"], it["name"], self._open_from_grid)
+            self.grid.addWidget(card, i // cols, i % cols)
+            self.cards.append(card)
+            card.load(period)
+
+    def _open_from_grid(self, kind, key):
+        idx = self.item.findData((kind, key))
+        if idx >= 0:
+            self.item.blockSignals(True)
+            self.item.setCurrentIndex(idx)
+            self.item.blockSignals(False)
+        self.mode.setCurrentText("단일 상세")   # _switch_mode 가 _reload 호출
+
+    def _load_single(self, *_):
+        data = self.item.currentData()
+        if not data:
+            return
+        kind, key = data
+        name = self.item.currentText()
+        period = self.period.currentText()
         self.stat.setText("불러오는 중…")
-
         if period == "당일":
-            self._load_intraday(idx)
+            self._single_intraday(kind, key, name)
             return
 
         def job():
-            return datasource.index_history(idx, period), datasource.index_valuation(idx)
+            hist = datasource.item_history(kind, key, period)
+            val = datasource.index_valuation(key) if kind == "index" else None
+            return hist, val
 
         def done(res):
             hist, val = res
@@ -2357,23 +2695,26 @@ class MarketTab(QWidget):
             chg = last - first
             pct = chg / first * 100 if first else 0
             col = "#cf222e" if chg > 0 else ("#1f6feb" if chg < 0 else "#57606a")
-            eps_txt = f" · 추정 EPS {val['eps']:,.1f}" if val.get("eps") else ""
-            per_txt = f" · PER {val['per']:.1f}" if val.get("per") else ""
+            extra = ""
+            if val:
+                if val.get("per"):
+                    extra += f" · PER {val['per']:.1f}"
+                if val.get("eps"):
+                    extra += f" · 추정 EPS {val['eps']:,.1f}"
             self.stat.setText(
-                f"<b>{val['name']}</b> "
+                f"<b>{name}</b> "
                 f"<span style='font-size:20px; font-weight:800'>{last:,.2f}</span> "
                 f"<span style='color:{col}; font-weight:700'>{chg:+,.2f} ({pct:+.2f}%)</span> "
-                f"<span style='color:#8b949e; font-size:12px'>· {period} 기준{per_txt}{eps_txt}</span>")
+                f"<span style='color:#8b949e; font-size:12px'>· {period} 기준{extra}</span>")
             self._draw(hist, col)
 
         def fail(msg):
             self.stat.setText(f"조회 실패: {msg}")
         run_async(self, job, done, fail)
 
-    def _load_intraday(self, idx):
-        """당일 분봉(실시간 근접) 지수 그래프."""
+    def _single_intraday(self, kind, key, name):
         def job():
-            return datasource.index_intraday(idx), datasource.index_live(idx)
+            return datasource.item_intraday(kind, key), datasource.item_live(kind, key)
 
         def done(res):
             pts, lp = res
@@ -2383,7 +2724,7 @@ class MarketTab(QWidget):
             col = "#cf222e" if chg > 0 else ("#1f6feb" if chg < 0 else "#57606a")
             price = lp.get("price") or pts[-1][1]
             self.stat.setText(
-                f"<b>{lp['name']}</b> "
+                f"<b>{name}</b> "
                 f"<span style='font-size:20px; font-weight:800'>{price:,.2f}</span> "
                 f"<span style='color:{col}; font-weight:700'>"
                 f"{chg:+,.2f} ({lp.get('change_pct', 0):+.2f}%)</span> "

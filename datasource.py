@@ -735,6 +735,61 @@ def index_live(index="KOSPI"):
             "change_pct": pct, "prev_close": prev}
 
 
+# ----------------------------- 원자재 / 시장 대시보드 -----------------------------
+# 주요 지수(그리드용). key 는 index_* 함수가 받는 이름.
+MARKET_INDICES = [
+    ("코스피", "KOSPI"), ("코스닥", "KOSDAQ"),
+    ("S&P500", "S&P500"), ("나스닥", "나스닥"), ("다우", "다우"),
+]
+# 주요 원자재 선물(yfinance). 두바이유는 무료 피드가 없어 국제 벤치마크 브렌트로 대체.
+COMMODITIES = [
+    ("WTI 원유", "CL=F"), ("브렌트유", "BZ=F"), ("천연가스", "NG=F"),
+    ("금", "GC=F"), ("은", "SI=F"), ("구리", "HG=F"),
+    ("백금", "PL=F"), ("팔라듐", "PA=F"),
+    ("옥수수", "ZC=F"), ("밀", "ZW=F"), ("대두", "ZS=F"),
+    ("설탕", "SB=F"), ("커피", "KC=F"), ("코코아", "CC=F"), ("면화", "CT=F"),
+]
+_YF_PERIOD = {"1개월": "1mo", "3개월": "3mo", "1년": "1y",
+              "3년": "3y", "5년": "5y", "전체": "max"}
+
+
+def commodity_history(ticker, period="1년"):
+    """원자재 종가 시계열 -> [(date, close), ...] (yfinance)."""
+    import yfinance as yf
+    h = yf.Ticker(ticker).history(period=_YF_PERIOD.get(period, "1y"),
+                                  interval="1d")
+    out = []
+    for idx, row in h.iterrows():
+        try:
+            c = float(row["Close"])
+            if c == c:
+                out.append((idx.strftime("%Y-%m-%d"), c))
+        except Exception:
+            pass
+    return out
+
+
+def item_live(kind, key):
+    """대시보드 아이템 현재값/등락. kind: 'index'|'commodity'."""
+    if kind == "index":
+        return index_live(key)
+    return live_price("US", key)
+
+
+def item_history(kind, key, period):
+    """대시보드 아이템 기간 종가 시계열 -> [(date, close), ...]."""
+    if kind == "index":
+        return index_history(key, period)
+    return commodity_history(key, period)
+
+
+def item_intraday(kind, key):
+    """대시보드 아이템 당일 분봉 -> [(ts, value), ...]."""
+    if kind == "index":
+        return index_intraday(key)
+    return intraday("US", key)
+
+
 def history(market: str, code: str, period: str):
     """일봉 OHLC 시계열. period: '1주'/'1개월'/'3개월'/'1년'/'3년'/'5년'/'전체'. KR·US 모두 FDR."""
     import FinanceDataReader as fdr
