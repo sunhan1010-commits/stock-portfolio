@@ -298,6 +298,8 @@ def _fetch_kr(code: str) -> dict:
     bps = _to_float(infos.get("bps"))
     roe = (eps / bps * 100.0) if (eps and bps) else None  # 추정 ROE = EPS/BPS
 
+    cons = d.get("consensusInfo") or {}
+
     return {
         "market": "KR",
         "code": code,
@@ -317,6 +319,18 @@ def _fetch_kr(code: str) -> dict:
         "wk52_high": _to_float(infos.get("highPriceOf52Weeks")),
         "wk52_low": _to_float(infos.get("lowPriceOf52Weeks")),
         "sector": None,
+        # --- 상세 데이터셋(선택 표시) ---
+        "open": _to_float(infos.get("openPrice")),
+        "high": _to_float(infos.get("highPrice")),
+        "low": _to_float(infos.get("lowPrice")),
+        "volume": _to_float(infos.get("accumulatedTradingVolume")),
+        "trading_value": infos.get("accumulatedTradingValue"),  # "12조 3,719억" 형태
+        "foreign_rate": infos.get("foreignRate"),               # "46.61%"
+        "cns_eps": _to_float(infos.get("cnsEps")),              # 추정 EPS
+        "dps": _to_float(infos.get("dividend")),               # 주당배당금
+        "target_price": _to_float(cons.get("priceTargetMean")),  # 목표주가 컨센서스
+        "recomm_mean": _to_float(cons.get("recommMean")),      # 투자의견(1~5, 높을수록 매수)
+        "recomm_scale": "kr",
     }
 
 
@@ -330,6 +344,9 @@ def _fetch_us(ticker: str) -> dict:
 
     roe = info.get("returnOnEquity")
     roe = roe * 100.0 if roe is not None else None  # yfinance는 소수(0.14) -> %
+
+    def _pct(v):
+        return v * 100.0 if v is not None else None
 
     return {
         "market": "US",
@@ -350,6 +367,38 @@ def _fetch_us(ticker: str) -> dict:
         "wk52_high": info.get("fiftyTwoWeekHigh"),
         "wk52_low": info.get("fiftyTwoWeekLow"),
         "sector": info.get("sector"),
+        # --- 상세 데이터셋(선택 표시) ---
+        "open": info.get("open") or info.get("regularMarketOpen"),
+        "high": info.get("dayHigh"),
+        "low": info.get("dayLow"),
+        "volume": info.get("volume") or info.get("regularMarketVolume"),
+        "avg_volume": info.get("averageVolume"),
+        "ma50": info.get("fiftyDayAverage"),
+        "ma200": info.get("twoHundredDayAverage"),
+        "target_price": info.get("targetMeanPrice"),
+        "recomm_mean": info.get("recommendationMean"),  # 1~5, 낮을수록 매수
+        "recomm_key": info.get("recommendationKey"),
+        "recomm_scale": "us",
+        "n_analysts": info.get("numberOfAnalystOpinions"),
+        "profit_margin": _pct(info.get("profitMargins")),
+        "operating_margin": _pct(info.get("operatingMargins")),
+        "revenue_growth": _pct(info.get("revenueGrowth")),
+        "earnings_growth": _pct(info.get("earningsGrowth")),
+        "roa": _pct(info.get("returnOnAssets")),
+        "debt_to_equity": info.get("debtToEquity"),
+        "current_ratio": info.get("currentRatio"),
+        "total_cash": info.get("totalCash"),
+        "total_debt": info.get("totalDebt"),
+        "fcf": info.get("freeCashflow"),
+        "ebitda": info.get("ebitda"),
+        "beta": info.get("beta"),
+        "peg": info.get("trailingPegRatio"),
+        "psr": info.get("priceToSalesTrailing12Months"),
+        "payout_ratio": _pct(info.get("payoutRatio")),
+        "inst_held": _pct(info.get("heldPercentInstitutions")),
+        "shares_out": info.get("sharesOutstanding"),
+        "industry": info.get("industry"),
+        "employees": info.get("fullTimeEmployees"),
     }
 
 
@@ -411,25 +460,44 @@ def kr_market_leaders(market: str = "ALL", n: int = 200):
     return out
 
 
+# 지수 심볼 맵: 표시이름 -> (FDR심볼, 통화)
+_INDEX_SYMBOLS = {
+    "KOSPI": ("KS11", "KRW"), "KOSDAQ": ("KQ11", "KRW"),
+    "S&P500": ("US500", "USD"), "나스닥": ("IXIC", "USD"),
+    "다우": ("DJI", "USD"),
+}
+_INDEX_NAMES = {
+    "KOSPI": "코스피", "KOSDAQ": "코스닥",
+    "S&P500": "S&P 500", "나스닥": "나스닥 종합", "다우": "다우존스 산업평균",
+}
+
+
 def index_history(index="KOSPI", period="1년"):
-    """코스피/코스닥 지수 종가 시계열 -> [(date, close), ...]. (FDR)"""
+    """지수 종가 시계열 -> [(date, close), ...]. 국내(코스피/코스닥)+미국(S&P500/나스닥/다우). (FDR)"""
     import FinanceDataReader as fdr
     from datetime import datetime, timedelta
     days = {"3개월": 100, "1년": 400, "3년": 1150, "5년": 1900}.get(period, 400)
-    symbol = {"KOSPI": "KS11", "KOSDAQ": "KQ11"}.get(index, "KS11")
+    symbol = _INDEX_SYMBOLS.get(index, ("KS11", "KRW"))[0]
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     df = fdr.DataReader(symbol, start)
     out = []
     for idx, row in df.iterrows():
         try:
-            out.append((idx.strftime("%Y-%m-%d"), float(row["Close"])))
+            v = float(row["Close"])
+            if v != v or v <= 0:   # NaN(오늘 미체결 등)·비정상 값 제외
+                continue
+            out.append((idx.strftime("%Y-%m-%d"), v))
         except Exception:
             pass
     return out
 
 
 def index_valuation(index="KOSPI"):
-    """지수 현재값 + PER/PBR/배당(스냅샷). EPS = 지수 ÷ PER 로 산출."""
+    """지수 현재값 + PER/PBR/배당(스냅샷). EPS = 지수 ÷ PER 로 산출.
+    미국 지수는 무료 PER/EPS 스냅샷이 없어 이름만 반환(추이는 index_history로)."""
+    if index in ("S&P500", "나스닥", "다우"):
+        return {"name": _INDEX_NAMES.get(index, index), "price": None,
+                "per": None, "pbr": None, "div": None, "eps": None}
     code = "KOSPI" if index == "KOSPI" else "KOSDAQ"
     r = requests.get(f"https://m.stock.naver.com/api/index/{code}/integration",
                      headers=_HEADERS, timeout=8)
@@ -479,6 +547,51 @@ def screen_fetch(codes, progress=None):
                 "price": q.get("price"), "per": q.get("per"),
                 "pbr": q.get("pbr"), "roe": q.get("roe"),
                 "div": q.get("div_yield"), "market_cap": q.get("market_cap"),
+            })
+        except Exception:
+            pass
+        if progress:
+            progress(i + 1, total)
+    return out
+
+
+# 미국 스크리너용 티커 분류(ETF는 재무지표가 없을 수 있음)
+_US_ETF_TICKERS = {"SPY", "VOO", "QQQ", "SCHD", "DIA", "VT", "JEPI"}
+
+
+def us_universe(kind="전체"):
+    """미국 스크리너 유니버스 [(ticker, name, is_etf), ...]. kind: '전체'/'주식'/'ETF'."""
+    out = []
+    for t, name, _ in _US_STOCKS:
+        is_etf = t in _US_ETF_TICKERS
+        if kind == "주식" and is_etf:
+            continue
+        if kind == "ETF" and not is_etf:
+            continue
+        out.append((t, name, is_etf))
+    return out
+
+
+def screen_fetch_us(tickers, progress=None):
+    """미국 티커 리스트의 재무지표를 모아 반환. 시총은 원화(KRW)로 환산해 국내와 동일 필터 사용."""
+    try:
+        usd = fx_to_krw("USD")
+    except Exception:
+        usd = 1300.0
+    out = []
+    total = len(tickers)
+    for i, t in enumerate(tickers):
+        try:
+            q = _fetch_us(t)
+            cap = q.get("market_cap")
+            out.append({
+                "market": "US", "code": t, "name": q.get("name") or t,
+                "currency": q.get("currency") or "USD",
+                "is_etf": t in _US_ETF_TICKERS,
+                "price": q.get("price"), "per": q.get("per"),
+                "pbr": q.get("pbr"), "roe": q.get("roe"),
+                "div": q.get("div_yield"),
+                "market_cap": (cap * usd) if cap else None,   # 원화 환산
             })
         except Exception:
             pass

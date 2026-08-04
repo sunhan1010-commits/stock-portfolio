@@ -195,6 +195,171 @@ class MetricsHelpDialog(QDialog):
         lay.addWidget(bb)
 
 
+# ============================ 상세 데이터셋 ============================
+def _fmt_big(v, cur):
+    """큰 금액을 조/억(원) 또는 T/B/M($)로 축약."""
+    if v is None:
+        return None
+    if cur == "USD":
+        a = abs(v)
+        if a >= 1e12:
+            return f"${v/1e12:.2f}T"
+        if a >= 1e9:
+            return f"${v/1e9:.2f}B"
+        if a >= 1e6:
+            return f"${v/1e6:.1f}M"
+        return f"${v:,.0f}"
+    a = abs(v)
+    if a >= 1e12:
+        return f"{v/1e12:,.2f}조원"
+    if a >= 1e8:
+        return f"{v/1e8:,.0f}억원"
+    return f"{v:,.0f}원"
+
+
+def _opinion_text(mean, scale):
+    """증권가 투자의견 평균 -> 사람이 읽는 등급."""
+    if mean is None:
+        return None
+    if scale == "us":   # 1=강력매수 ~ 5=매도
+        label = ("강력매수" if mean <= 1.5 else "매수" if mean <= 2.5 else
+                 "중립" if mean <= 3.5 else "매도" if mean <= 4.5 else "강력매도")
+    else:               # kr: 5=매수 우위 ~ 1=매도
+        label = ("강력매수" if mean >= 4.5 else "매수" if mean >= 3.5 else
+                 "중립" if mean >= 2.5 else "매도" if mean >= 1.5 else "강력매도")
+    return f"{label} ({mean:.2f})"
+
+
+def detail_sections(q):
+    """quote dict -> [(섹션명, [(라벨, 값HTML), ...]), ...]. 값 없는 행/섹션은 생략."""
+    cur = q.get("currency", "USD")
+    money = lambda v: fmt_money(v, cur) if v is not None else None
+    pct = lambda v: f"{v:,.2f}%" if v is not None else None
+    ratio = lambda v, s="배": f"{v:,.2f}{s}" if v is not None else None
+    intc = lambda v: f"{v:,.0f}" if v is not None else None
+
+    # 목표주가 + 상승여력
+    tgt = q.get("target_price")
+    price = q.get("price")
+    tgt_html = None
+    if tgt:
+        tgt_html = money(tgt)
+        if price:
+            up = (tgt - price) / price * 100
+            col = "#cf222e" if up > 0 else ("#1f6feb" if up < 0 else "#57606a")
+            tgt_html += f"  <span style='color:{col}'>({up:+.1f}% 여력)</span>"
+
+    sections = [
+        ("가격·거래", [
+            ("시가", money(q.get("open"))),
+            ("고가", money(q.get("high"))),
+            ("저가", money(q.get("low"))),
+            ("거래량", intc(q.get("volume"))),
+            ("거래대금", q.get("trading_value")),
+            ("평균거래량", intc(q.get("avg_volume"))),
+            ("52주 최고", money(q.get("wk52_high"))),
+            ("52주 최저", money(q.get("wk52_low"))),
+            ("50일 이동평균", money(q.get("ma50"))),
+            ("200일 이동평균", money(q.get("ma200"))),
+        ]),
+        ("밸류에이션", [
+            ("PER", ratio(q.get("per"))),
+            ("추정 PER(Forward)", ratio(q.get("forward_per"))),
+            ("PBR", ratio(q.get("pbr"))),
+            ("PSR(주가매출비율)", ratio(q.get("psr"))),
+            ("PEG(성장 대비 PER)", ratio(q.get("peg"), "")),
+            ("EPS(주당순이익)", money(q.get("eps"))),
+            ("추정 EPS", money(q.get("cns_eps"))),
+            ("BPS(주당순자산)", money(q.get("bps"))),
+            ("시가총액", _fmt_big(q.get("market_cap"), cur)),
+            ("EV 대비 EBITDA(EBITDA)", _fmt_big(q.get("ebitda"), cur)),
+        ]),
+        ("수익성·성장", [
+            ("ROE(자기자본이익률)", pct(q.get("roe"))),
+            ("ROA(총자산이익률)", pct(q.get("roa"))),
+            ("순이익률", pct(q.get("profit_margin"))),
+            ("영업이익률", pct(q.get("operating_margin"))),
+            ("매출 성장률(YoY)", pct(q.get("revenue_growth"))),
+            ("이익 성장률(YoY)", pct(q.get("earnings_growth"))),
+        ]),
+        ("재무 안정성", [
+            ("부채비율(D/E)", ratio(q.get("debt_to_equity"), "%")),
+            ("유동비율", ratio(q.get("current_ratio"), "")),
+            ("총현금", _fmt_big(q.get("total_cash"), cur)),
+            ("총부채", _fmt_big(q.get("total_debt"), cur)),
+            ("잉여현금흐름(FCF)", _fmt_big(q.get("fcf"), cur)),
+            ("베타(시장 민감도)", ratio(q.get("beta"), "")),
+        ]),
+        ("배당", [
+            ("배당수익률", pct(q.get("div_yield"))),
+            ("주당배당금(DPS)", money(q.get("dps"))),
+            ("배당성향", pct(q.get("payout_ratio"))),
+        ]),
+        ("증권가 컨센서스", [
+            ("목표주가", tgt_html),
+            ("투자의견", _opinion_text(q.get("recomm_mean"), q.get("recomm_scale"))),
+            ("분석가 수", intc(q.get("n_analysts"))),
+            ("외국인 보유율", q.get("foreign_rate")),
+            ("기관 보유율", pct(q.get("inst_held"))),
+        ]),
+        ("기타", [
+            ("업종/산업", q.get("sector") or q.get("industry")),
+            ("상장주식수", intc(q.get("shares_out"))),
+            ("임직원 수", intc(q.get("employees"))),
+        ]),
+    ]
+    out = []
+    for title, rows in sections:
+        kept = [(lbl, val) for lbl, val in rows if val]
+        if kept:
+            out.append((title, kept))
+    return out
+
+
+def detail_html(q):
+    parts = ["<style>h3{margin:14px 0 4px;color:#0969da;} "
+             "table{border-collapse:collapse;width:100%;} "
+             "td{padding:3px 6px;border-bottom:1px solid #eee;} "
+             ".l{color:#57606a;width:52%;} .v{font-weight:600;}</style>"]
+    secs = detail_sections(q)
+    if not secs:
+        return "<p>표시할 상세 데이터가 없습니다.</p>"
+    for title, rows in secs:
+        parts.append(f"<h3>{title}</h3><table>")
+        for lbl, val in rows:
+            parts.append(f"<tr><td class='l'>{lbl}</td>"
+                         f"<td class='v'>{val}</td></tr>")
+        parts.append("</table>")
+    return "\n".join(parts)
+
+
+class DetailDialog(QDialog):
+    """종목의 확장 재무·거래·컨센서스 데이터셋을 표로 보여준다."""
+    def __init__(self, parent, q):
+        super().__init__(parent)
+        name = q.get("name", ""); code = q.get("code", "")
+        self.setWindowTitle(f"상세 데이터 · {name} ({code})")
+        self.resize(560, 640)
+        lay = QVBoxLayout(self)
+        flag = "🇰🇷" if q.get("market") == "KR" else "🇺🇸"
+        head = QLabel(f"{flag} <b>{name}</b> ({code}) — 현재가 "
+                      f"{fmt_money(q.get('price'), q.get('currency','USD'))}")
+        head.setTextFormat(Qt.RichText)
+        lay.addWidget(head)
+        view = QTextBrowser()
+        view.setHtml(detail_html(q))
+        view.setOpenExternalLinks(False)
+        lay.addWidget(view, 1)
+        note = QLabel("※ 데이터 제공 범위는 종목·시장에 따라 다릅니다(빈 항목은 제외). "
+                      "국내는 네이버, 미국은 yfinance 기준. 참고용이며 투자권유가 아닙니다.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8b949e; font-size:11px;")
+        lay.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.button(QDialogButtonBox.Close).clicked.connect(self.accept)
+        lay.addWidget(bb)
+
+
 # ============================ 종목 분석 탭 ============================
 class AnalyzeTab(QWidget):
     def __init__(self, main):
@@ -1394,9 +1559,14 @@ class RealtimeTab(QWidget):
         self.add_port_btn = QPushButton("＋ 포트폴리오에 추가")
         self.add_port_btn.setEnabled(False)
         self.add_port_btn.clicked.connect(self.add_to_portfolio)
+        self.detail_btn = QPushButton("📊 상세 데이터")
+        self.detail_btn.setEnabled(False)
+        self.detail_btn.setToolTip("목표주가·마진·성장률·재무안정성 등 확장 데이터셋 보기")
+        self.detail_btn.clicked.connect(self._show_detail)
         help_btn = QPushButton("ⓘ 지표 설명")
         help_btn.clicked.connect(lambda: MetricsHelpDialog(self).exec())
         actrow.addWidget(self.add_port_btn)
+        actrow.addWidget(self.detail_btn)
         actrow.addWidget(help_btn)
         actrow.addStretch()
         rlay.addLayout(actrow)
@@ -1630,10 +1800,16 @@ class RealtimeTab(QWidget):
             self.quote = q
             self._render_analysis(q)
             self.add_port_btn.setEnabled(True)
+            self.detail_btn.setEnabled(True)
 
         def fail(msg):
             self.summary.setText(f"지표 조회 실패: {msg}")
         run_async(self, job, done, fail)
+
+    def _show_detail(self):
+        q = getattr(self, "quote", None)
+        if q:
+            DetailDialog(self, q).exec()
 
     def _render_analysis(self, q):
         evals = metrics.evaluate(q)
@@ -1877,7 +2053,10 @@ class ScreenerTab(QWidget):
         # 유니버스 선택
         u = QHBoxLayout()
         u.addWidget(QLabel("시장"))
-        self.market = QComboBox(); self.market.addItems(["전체", "KOSPI", "KOSDAQ"])
+        self.market = QComboBox()
+        self.market.addItems(["전체(국내)", "KOSPI", "KOSDAQ",
+                              "미국 주식", "미국 ETF", "미국 전체"])
+        self.market.currentTextChanged.connect(self._on_market_changed)
         u.addWidget(self.market)
         u.addWidget(QLabel("개수"))
         self.count = QComboBox(); self.count.addItems(["50", "100", "200", "300"])
@@ -1931,17 +2110,26 @@ class ScreenerTab(QWidget):
         lay.addWidget(self.table, 1)
 
         hint = QLabel("※ 더블클릭=분석 탭으로 이동 · 여러 행 선택 후 ‘⭐ 선택종목 관심추가’로 저장. "
-                      "지표는 참고용이며 투자권유가 아닙니다. (국내 종목 기준)")
+                      "국내는 시총상위/섹터, 미국은 주요 대형주·ETF를 조회합니다(미국은 시총을 원화로 환산). "
+                      "ETF는 PER·PBR 등이 없을 수 있어요. 지표는 참고용이며 투자권유가 아닙니다.")
         hint.setStyleSheet("color:#8b949e; font-size:11px;")
         lay.addWidget(hint)
 
         # 섹터 목록 백그라운드 로딩
         run_async(self, datasource.kr_sectors, self._on_sectors, lambda *_: None)
 
+    _US_KIND = {"미국 주식": "주식", "미국 ETF": "ETF", "미국 전체": "전체"}
+
     def _on_sectors(self, sectors):
         self._sectors = sectors or []
         for no, name, cnt in self._sectors:
             self.sector.addItem(f"{name} ({cnt})", no)
+
+    def _on_market_changed(self, text):
+        # 미국 시장은 섹터·개수 필터가 국내 전용이라 비활성화
+        is_us = text in self._US_KIND
+        self.sector.setEnabled(not is_us)
+        self.count.setEnabled(not is_us)
 
     def _load(self):
         if self._busy:
@@ -1949,12 +2137,16 @@ class ScreenerTab(QWidget):
         self._busy = True
         self.load_btn.setEnabled(False)
         self.status.setText("종목·재무 불러오는 중… (수십 초 걸릴 수 있어요)")
-        market = self.market.currentText()
-        market = {"전체": "ALL"}.get(market, market)
+        mtext = self.market.currentText()
+        us_kind = self._US_KIND.get(mtext)
+        market = {"전체(국내)": "ALL"}.get(mtext, mtext)
         n = int(self.count.currentText())
         sector_no = self.sector.currentData()
 
         def job():
+            if us_kind:
+                tickers = [t for t, _n, _e in datasource.us_universe(us_kind)]
+                return datasource.screen_fetch_us(tickers)
             if sector_no is not None:
                 codes = [c for c, _ in datasource.kr_sector_stocks(sector_no, 300)]
             else:
@@ -1999,9 +2191,13 @@ class ScreenerTab(QWidget):
         self.table.setRowCount(len(rows))
         for i, d in enumerate(rows):
             cap_eok = (d["market_cap"] or 0) / 1e8
+            mkt = d.get("market", "KR")
+            flag = "🇺🇸" if mkt == "US" else "🇰🇷"
+            cur = d.get("currency", "USD") if mkt == "US" else "KRW"
+            tag = " · ETF" if d.get("is_etf") else ""
             cells = [
-                (f"🇰🇷 {d['name']}", None),
-                (fmt_money(d["price"], "KRW") if d["price"] else "-", d["price"]),
+                (f"{flag} {d['name']}", None),
+                (fmt_money(d["price"], cur) if d["price"] else "-", d["price"]),
                 (f"{d['per']:.1f}" if d["per"] else "-", d["per"]),
                 (f"{d['pbr']:.2f}" if d["pbr"] else "-", d["pbr"]),
                 (f"{d['roe']:.1f}%" if d["roe"] is not None else "-", d["roe"]),
@@ -2011,8 +2207,9 @@ class ScreenerTab(QWidget):
             for c, (text, val) in enumerate(cells):
                 if c == 0:
                     it = QTableWidgetItem(text)
-                    it.setToolTip(f"{d['name']} ({d['code']})")
+                    it.setToolTip(f"{d['name']} ({d['code']}){tag}")
                     it.setData(Qt.UserRole, d["code"])
+                    it.setData(Qt.UserRole + 1, mkt)
                 else:
                     it = _NumItem(text, val)
                 self.table.setItem(i, c, it)
@@ -2023,7 +2220,9 @@ class ScreenerTab(QWidget):
         row = self.table.currentRow()
         if row < 0:
             return
-        code = self.table.item(row, 0).data(Qt.UserRole)
+        it0 = self.table.item(row, 0)
+        code = it0.data(Qt.UserRole)
+        mkt = it0.data(Qt.UserRole + 1) or "KR"
         if not code:
             return
         rt = self.main.active_realtime_tab() or \
@@ -2033,7 +2232,7 @@ class ScreenerTab(QWidget):
             rt = self.main.active_realtime_tab()
         if not rt:
             return
-        rt._view_symbol("KR", code)
+        rt._view_symbol(mkt, code)
         self.main.tabs.setCurrentWidget(rt)
 
     def _add_selected_watch(self):
@@ -2051,7 +2250,8 @@ class ScreenerTab(QWidget):
             code = it.data(Qt.UserRole)
             if not code:
                 continue
-            db.add_watchlist(pid, "KR", code, by_code.get(code) or it.text())
+            mkt = it.data(Qt.UserRole + 1) or "KR"
+            db.add_watchlist(pid, mkt, code, by_code.get(code) or it.text())
             names.append(by_code.get(code) or code)
             cnt += 1
         # 해당 프로필의 실시간 탭 목록 즉시 반영
@@ -2075,7 +2275,8 @@ class MarketTab(QWidget):
         self.main = main
         lay = QVBoxLayout(self)
         bar = QHBoxLayout()
-        self.index = QComboBox(); self.index.addItems(["KOSPI", "KOSDAQ"])
+        self.index = QComboBox()
+        self.index.addItems(["KOSPI", "KOSDAQ", "S&P500", "나스닥", "다우"])
         self.index.currentTextChanged.connect(self._load)
         self.period = QComboBox(); self.period.addItems(["3개월", "1년", "3년", "5년"])
         self.period.setCurrentText("1년")
@@ -2093,8 +2294,9 @@ class MarketTab(QWidget):
         self.chart.setMargins(QMargins(4, 4, 4, 4))
         self.cv = QChartView(self.chart); self.cv.setRenderHint(QPainter.Antialiasing)
         lay.addWidget(self.cv, 1)
-        note = QLabel("※ 코스피/코스닥 지수 추이(무료 지연). 지수 전체 PER·EPS 시계열은 "
-                      "무료 데이터로 제공되지 않아 지수 추이로 대체합니다.")
+        note = QLabel("※ 국내(코스피·코스닥) + 미국(S&P500·나스닥·다우) 지수 추이(무료 지연). "
+                      "국내 지수는 PER·EPS 스냅샷을 함께 표시하며, 미국 지수는 무료 PER·EPS가 "
+                      "제공되지 않아 지수 추이만 보여줍니다.")
         note.setWordWrap(True); note.setStyleSheet("color:#8b949e; font-size:11px;")
         lay.addWidget(note)
         self._loaded = False
@@ -2361,7 +2563,18 @@ class IncomeCalcTab(QWidget):
         self.main = main
         self.rows = []       # [(name_edit, pct_spin, amt_spin)]
         self._sync = False   # 재귀 갱신 방지
+        self._loading = False  # 프로필 불러오는 중엔 저장 안 함
         lay = QVBoxLayout(self)
+        pbar = QHBoxLayout()
+        pbar.addWidget(QLabel("프로필"))
+        self.profile = QComboBox(); self.profile.setMinimumWidth(160)
+        self.profile.currentIndexChanged.connect(self._on_profile_changed)
+        pbar.addWidget(self.profile)
+        pinfo = QLabel("계획은 선택한 프로필에 자동 저장됩니다.")
+        pinfo.setStyleSheet("color:#8b949e; font-size:11px;")
+        pbar.addWidget(pinfo)
+        pbar.addStretch()
+        lay.addLayout(pbar)
         top = QHBoxLayout()
         top.addWidget(QLabel("월 소득(원)"))
         self.income = QDoubleSpinBox(); self.income.setRange(0, 1e12)
@@ -2397,7 +2610,77 @@ class IncomeCalcTab(QWidget):
         note.setWordWrap(True); note.setStyleSheet("color:#8b949e; font-size:11px;")
         lay.addWidget(note)
 
-        self._apply_preset("균형형 (기본)")
+        self._rebuild_profiles()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._rebuild_profiles()
+
+    def _rebuild_profiles(self):
+        """프로필 목록을 다시 채우고 현재 프로필 계획을 불러온다."""
+        self._loading = True
+        prev = self.profile.currentData()
+        self.profile.blockSignals(True)
+        self.profile.clear()
+        profs = db.list_profiles()
+        for p in profs:
+            self.profile.addItem(p["name"], p["id"])
+        # 이전 선택 유지, 없으면 활성 프로필
+        target = prev if prev in [p["id"] for p in profs] else self.main.active_profile_id()
+        idx = self.profile.findData(target)
+        if idx >= 0:
+            self.profile.setCurrentIndex(idx)
+        self.profile.blockSignals(False)
+        self._loading = False
+        self._load_plan()
+
+    def _current_pid(self):
+        pid = self.profile.currentData()
+        return pid if pid is not None else self.main.active_profile_id()
+
+    def _on_profile_changed(self, *_):
+        if not self._loading:
+            self._load_plan()
+
+    def _load_plan(self):
+        """선택 프로필의 저장된 배분 계획을 불러온다(없으면 기본 프리셋)."""
+        self._loading = True
+        raw = db.get_setting(f"income_plan_{self._current_pid()}")
+        plan = None
+        if raw:
+            try:
+                plan = json.loads(raw)
+            except Exception:
+                plan = None
+        if not plan or not plan.get("items"):
+            self.profile.setToolTip("")
+            self._loading = False
+            self._apply_preset("균형형 (기본)")
+            return
+        self.income.blockSignals(True)
+        self.income.setValue(plan.get("income", 3000000))
+        self.income.blockSignals(False)
+        self.preset.blockSignals(True)
+        self.preset.setCurrentText(plan.get("preset", "직접입력"))
+        self.preset.blockSignals(False)
+        self.table.setRowCount(0)
+        self.rows = []
+        for it in plan["items"]:
+            self._add_row(it.get("name", ""), it.get("pct", 0), mark_custom=False)
+        self._loading = False
+        self._refresh_summary()
+
+    def _save_plan(self):
+        if self._loading:
+            return
+        plan = {
+            "income": self.income.value(),
+            "preset": self.preset.currentText(),
+            "items": [{"name": ne.text(), "pct": sp.value()}
+                      for ne, sp, _amt in self.rows],
+        }
+        db.set_setting(f"income_plan_{self._current_pid()}",
+                       json.dumps(plan, ensure_ascii=False))
 
     def _add_row(self, name, pct, mark_custom=True):
         r = self.table.rowCount()
@@ -2482,6 +2765,7 @@ class IncomeCalcTab(QWidget):
             f"({tot_amt:,.0f}원){warn}<br>"
             f"<span style='color:#1a7f37; font-weight:700'>저축·투자 합계 {save:,.0f}원/월 "
             f"(연 {save*12:,.0f}원)</span>")
+        self._save_plan()
 
 
 # ============================ 메인 윈도우 ============================

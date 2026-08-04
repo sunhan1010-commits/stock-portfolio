@@ -29,6 +29,9 @@ GLOSSARY = [
     {"name": "PER (주가수익비율)",
      "desc": "주가를 주당순이익(EPS)으로 나눈 값. '지금 이익 기준으로 원금 회수에 몇 년'인가를 뜻해요. 낮을수록 이익 대비 주가가 쌉니다.",
      "guide": "10 미만 저평가 · 10~20 적정 · 20~35 다소 높음 · 35 초과 주의. 단, 성장주는 높은 PER이 정상일 수 있어요. 적자면 PER은 의미가 없습니다."},
+    {"name": "추정 PER (Forward PER)",
+     "desc": "현재 주가를 '향후 12개월 예상 EPS'로 나눈 값. 현재(실적) PER이 과거 이익 기준이라면, 추정 PER은 앞으로의 예상 이익 기준이에요.",
+     "guide": "추정 PER이 현재 PER보다 낮으면 이익 성장 기대(주가가 미래 이익 대비 싸짐), 높으면 이익 둔화 우려. 애널리스트 추정치라 실제와 다를 수 있어 참고용입니다."},
     {"name": "PBR (주가순자산비율)",
      "desc": "주가를 주당순자산(BPS, 회사가 가진 순재산)으로 나눈 값. 회사 장부상 가치 대비 주가 배수예요.",
      "guide": "1 미만이면 순자산보다 싸게 거래(저평가) · 1~2 적정 · 2~4 다소 높음 · 4 초과 주의."},
@@ -78,6 +81,33 @@ def eval_per(per):
             "help": ("PER = 주가 ÷ 주당순이익(EPS). 이익 대비 주가가 몇 배인지.\n"
                      "낮을수록 저렴. 통상 10 미만 저평가, 10~20 적정, 20↑ 부담.\n"
                      "단, 성장주는 높은 PER이 정상일 수 있습니다.")}
+
+
+def eval_forward_per(fper, per=None):
+    if fper is None:
+        return {"key": "추정 PER", "value": None, "level": "na", "text": "정보 없음",
+                "help": "추정 PER(Forward PER) = 주가 ÷ 향후 12개월 예상 EPS. "
+                        "애널리스트 실적 추정 기반이라 종목에 따라 제공되지 않을 수 있습니다."}
+    if fper <= 0:
+        return {"key": "추정 PER", "value": fper, "level": "na",
+                "text": "적자 예상 — 추정 PER 무의미",
+                "help": "향후 예상 이익이 적자라 추정 PER로 평가하기 어렵습니다."}
+    level, text = _band(fper, [
+        (10, "good", "저평가 구간 (10배 미만)"),
+        (20, "ok",   "적정 구간 (10~20배)"),
+        (35, "warn", "다소 높음 (20~35배)"),
+        (None, "bad", "고평가 주의 (35배 초과)"),
+    ])
+    trend = ""
+    if per and per > 0:
+        if fper < per * 0.97:
+            trend = " · 향후 이익 개선 기대(현재 PER보다 낮음)"
+        elif fper > per * 1.03:
+            trend = " · 향후 이익 둔화 우려(현재 PER보다 높음)"
+    return {"key": "추정 PER", "value": fper, "level": level, "text": text + trend,
+            "help": ("추정 PER(Forward PER) = 주가 ÷ 향후 12개월 예상 EPS.\n"
+                     "현재(실적) PER보다 낮으면 이익 성장 기대, 높으면 둔화 우려.\n"
+                     "추정치라 실제와 다를 수 있으니 참고용으로만 보세요.")}
 
 
 def eval_pbr(pbr):
@@ -148,6 +178,7 @@ def evaluate(quote: dict) -> list[dict]:
     """quote(datasource.get_quote 결과) -> 지표 평가 리스트."""
     return [
         eval_per(quote.get("per")),
+        eval_forward_per(quote.get("forward_per"), quote.get("per")),
         eval_pbr(quote.get("pbr")),
         eval_roe(quote.get("roe")),
         eval_div(quote.get("div_yield")),
@@ -210,7 +241,8 @@ def overall(evals: list[dict]) -> dict:
     """지표들을 종합해 대략적인 한 줄 총평(참고용)."""
     score = {"good": 2, "ok": 1, "warn": -1, "bad": -2, "na": 0}
     # 밸류에이션 핵심(PER, PBR) 위주로 가중
-    weight = {"PER": 2, "PBR": 2, "ROE": 1, "배당수익률": 1, "52주 위치": 1}
+    weight = {"PER": 2, "PBR": 2, "ROE": 1, "배당수익률": 1, "52주 위치": 1,
+              "추정 PER": 0}
     total = 0
     wsum = 0
     for e in evals:
