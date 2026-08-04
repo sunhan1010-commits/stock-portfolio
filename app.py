@@ -1962,18 +1962,53 @@ class RealtimeTab(QWidget):
                           for k in ("볼린저밴드", "이동평균", "일목균형표"))
             show_osc = (self._ind_checks["RSI"].isChecked()
                         or self._ind_checks["MACD"].isChecked())
-            if period == "당일":
-                self._draw_line(data, lp.get("prev_close"), col)
-                self._clear_osc()
-            elif overlay:
-                self._draw_price_indicators(data, col)
-                self._render_osc(data) if show_osc else self._clear_osc()
-            elif period in ("5년", "전체"):
-                self._draw_hist_line(data, col)
-                self._render_osc(data) if show_osc else self._clear_osc()
+            is_intraday = (period == "당일")
+            # 데이터를 (xs_ms, highs, lows, closes) 공통 형태로 변환
+            if is_intraday:
+                xs, closes = [], []
+                for ts, pr in data:
+                    ms = QDateTime.fromString(str(ts),
+                                              "yyyyMMddHHmmss").toMSecsSinceEpoch()
+                    xs.append(ms); closes.append(pr)
+                highs = lows = closes
             else:
-                self._draw_candles(data)
-                self._render_osc(data) if show_osc else self._clear_osc()
+                xs = [QDateTime.fromString(d["date"],
+                                           "yyyy-MM-dd").toMSecsSinceEpoch()
+                      for d in data]
+                closes = [d["close"] for d in data]
+                highs = [d["high"] for d in data]
+                lows = [d["low"] for d in data]
+
+            try:
+                if not xs:
+                    self._clear_chart(); self._clear_osc()
+                elif overlay:
+                    self._draw_price_indicators(xs, highs, lows, closes, col,
+                                                is_intraday,
+                                                lp.get("prev_close") if is_intraday else None)
+                elif is_intraday:
+                    self._draw_line(data, lp.get("prev_close"), col)
+                elif period in ("5년", "전체"):
+                    self._draw_hist_line(data, col)
+                else:
+                    self._draw_candles(data)
+                if xs and show_osc and len(closes) >= 30:
+                    self._render_osc(xs, closes, is_intraday)
+                else:
+                    self._clear_osc()
+            except Exception as e:
+                # 지표 렌더 오류 시에도 앱이 죽지 않도록 기본 라인으로 폴백
+                try:
+                    if is_intraday:
+                        self._draw_line(data, lp.get("prev_close"), col)
+                    else:
+                        self._draw_candles(data)
+                    self._clear_osc()
+                except Exception:
+                    pass
+                self.big.setText(self.big.text() +
+                                 "<br><span style='color:#8b949e;font-size:11px'>"
+                                 f"지표 표시 오류: {e}</span>")
 
         def fail(msg):
             self.big.setText(f"차트 조회 실패: {msg}")
@@ -1991,6 +2026,7 @@ class RealtimeTab(QWidget):
         for ax in list(self.chart.axes()):
             self.chart.removeAxis(ax)
         self.chart.setTitle("")
+        self.chart.legend().hide()   # 지표 오버레이가 켜질 때만 다시 표시
 
     def _draw_line(self, pts, prev_close, color_hex):
         """당일 분봉 라인(간단 버전)."""
@@ -2092,27 +2128,27 @@ class RealtimeTab(QWidget):
         self.chart.setTitleFont(QFont("Malgun Gothic", 8))
 
     # ---- 기술적 지표 오버레이/보조창 ----
-    def _draw_price_indicators(self, data, color_hex):
-        """가격을 종가 라인으로 그리고 볼밴/이동평균/일목균형표를 겹쳐 표시."""
+    def _draw_price_indicators(self, xs, highs, lows, closes, color_hex,
+                               is_intraday=False, prev_close=None):
+        """가격을 종가 라인으로 그리고 볼밴/이동평균/일목균형표를 안전하게 겹쳐 표시."""
         self._clear_chart()
-        if not data:
+        if not xs:
             return
         self.chart.legend().show()
         self.chart.legend().setAlignment(Qt.AlignBottom)
         self.chart.legend().setFont(QFont("Malgun Gothic", 7))
-        dates = [d["date"] for d in data]
-        xs = [QDateTime.fromString(dt, "yyyy-MM-dd").toMSecsSinceEpoch() for dt in dates]
-        closes = [d["close"] for d in data]
-        highs = [d["high"] for d in data]
-        lows = [d["low"] for d in data]
-        allvals = list(closes)
+        allvals = [c for c in closes if c is not None]
         attach = []
 
         def add_line(name, ys, color, width=1, dashed=False, X=None):
+            XX = X if X is not None else xs
             s = QLineSeries(); s.setName(name)
-            for x, y in zip(X or xs, ys):
+            n = 0
+            for x, y in zip(XX, ys):
                 if y is not None:
-                    s.append(x, y)
+                    s.append(x, y); n += 1
+            if n == 0:               # 빈 시리즈는 추가하지 않는다(크래시 방지)
+                return None
             pen = s.pen(); pen.setColor(QColor(color)); pen.setWidth(width)
             if dashed:
                 pen.setStyle(Qt.DashLine)
@@ -2121,13 +2157,17 @@ class RealtimeTab(QWidget):
             return s
 
         add_line("종가", closes, color_hex, 2)
-        axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(7)
-        axx.setLabelsFont(QFont("Malgun Gothic", 8))
+        if is_intraday and prev_close:
+            add_line("전일종가", [prev_close] * len(xs), "#8b949e", 1, True)
+            allvals.append(prev_close)
+        axx = QDateTimeAxis()
+        axx.setFormat("HH:mm" if is_intraday else "yy.MM")
+        axx.setTickCount(7); axx.setLabelsFont(QFont("Malgun Gothic", 8))
         axy = QValueAxis(); axy.setLabelsFont(QFont("Malgun Gothic", 8))
         C = self._ind_checks
         x_hi = xs[-1]
 
-        if C["볼린저밴드"].isChecked():
+        if C["볼린저밴드"].isChecked() and len(closes) >= 20:
             mid, up, lo = indicators.bollinger(closes)
             add_line("BB상단", up, "#8250df", 1, True)
             add_line("BB중심", mid, "#8250df", 1)
@@ -2136,98 +2176,105 @@ class RealtimeTab(QWidget):
         if C["이동평균"].isChecked():
             add_line("MA20", indicators.sma(closes, 20), "#1a7f37", 1)
             add_line("MA60", indicators.sma(closes, 60), "#bf8700", 1)
-        if C["일목균형표"].isChecked():
+        # 일목은 일봉(H/L 필요)에서만, 데이터가 충분할 때만.
+        # 구름(선행스팬 A·B)은 QAreaSeries가 PySide6에서 페인트 중 크래시를 유발하므로
+        # 경계선 2개(선행A/선행B)로 그린다.
+        if C["일목균형표"].isChecked() and not is_intraday and len(closes) >= 52:
             ich = indicators.ichimoku(highs, lows, closes)
             shift = ich["shift"]
-            last = QDateTime.fromString(dates[-1], "yyyy-MM-dd")
-            fut = [last.addDays(k + 1).toMSecsSinceEpoch() for k in range(shift)]
-            xs_ext = xs + fut
-            x_hi = xs_ext[-1]
-
-            def shifted(vals):
-                out = [None] * len(xs_ext)
-                for i, v in enumerate(vals):
-                    j = i + shift
-                    if j < len(out):
-                        out[j] = v
-                return out
-            sA = QLineSeries(); sB = QLineSeries()
-            for x, y in zip(xs_ext, shifted(ich["spanA"])):
-                if y is not None:
-                    sA.append(x, y)
-            for x, y in zip(xs_ext, shifted(ich["spanB"])):
-                if y is not None:
-                    sB.append(x, y)
-            cloud = QAreaSeries(sA, sB); cloud.setName("구름")
-            cc = QColor("#8250df"); cc.setAlpha(45); cloud.setBrush(cc)
-            cpen = cloud.pen(); cpen.setColor(QColor("#8250df")); cpen.setWidth(0)
-            cloud.setPen(cpen)
-            self.chart.addSeries(cloud); attach.append(cloud)
+            gap = (xs[-1] - xs[0]) / max(1, len(xs) - 1)
+            xs_ext = list(xs) + [xs[-1] + gap * (k + 1) for k in range(shift)]
+            spanA = [None] * len(xs_ext)
+            spanB = [None] * len(xs_ext)
+            for i in range(len(closes)):
+                j = i + shift
+                if j < len(xs_ext):
+                    spanA[j] = ich["spanA"][i]
+                    spanB[j] = ich["spanB"][i]
+            add_line("선행A", spanA, "#cf222e", 1, True, X=xs_ext)
+            add_line("선행B", spanB, "#1f6feb", 1, True, X=xs_ext)
             add_line("전환선", ich["tenkan"], "#e16f24", 1)
             add_line("기준선", ich["kijun"], "#0969da", 1)
             allvals += [v for v in ich["spanA"] + ich["spanB"] if v is not None]
+            valid_ext = [xs_ext[k] for k in range(len(xs_ext))
+                         if spanA[k] is not None or spanB[k] is not None]
+            if valid_ext:
+                x_hi = max(x_hi, valid_ext[-1])
 
+        if not attach or not allvals:
+            self.chart.legend().hide()
+            return
         self.chart.addAxis(axx, Qt.AlignBottom)
-        axx.setRange(QDateTime.fromMSecsSinceEpoch(xs[0]),
-                     QDateTime.fromMSecsSinceEpoch(x_hi))
+        axx.setRange(QDateTime.fromMSecsSinceEpoch(int(xs[0])),
+                     QDateTime.fromMSecsSinceEpoch(int(x_hi)))
         lo_v, hi_v = min(allvals), max(allvals)
-        pad = (hi_v - lo_v) * 0.08 or 1
+        pad = (hi_v - lo_v) * 0.08 or (abs(hi_v) * 0.01 or 1)
         axy.setRange(lo_v - pad, hi_v + pad)
         self.chart.addAxis(axy, Qt.AlignLeft)
         for s in attach:
             s.attachAxis(axx); s.attachAxis(axy)
-        self.chart.setTitle(f"{dates[0]} ~ {dates[-1]}  · 지표 오버레이")
+        self.chart.setTitle("지표 오버레이" + (" · 당일" if is_intraday else ""))
         self.chart.setTitleFont(QFont("Malgun Gothic", 8))
 
-    def _render_osc(self, data):
+    def _render_osc(self, xs, closes, is_intraday=False):
         """보조지표 창: RSI(우선) 또는 MACD."""
         self.osc_chart.removeAllSeries()
         for ax in list(self.osc_chart.axes()):
             self.osc_chart.removeAxis(ax)
-        if not data or len(data) < 30:
+        if not xs or len(closes) < 30:
             self.osc_view.setVisible(False); return
-        dates = [d["date"] for d in data]
-        xs = [QDateTime.fromString(dt, "yyyy-MM-dd").toMSecsSinceEpoch() for dt in dates]
-        closes = [d["close"] for d in data]
         C = self._ind_checks
         self.osc_chart.legend().setVisible(True)
         self.osc_chart.legend().setAlignment(Qt.AlignBottom)
         self.osc_chart.legend().setFont(QFont("Malgun Gothic", 7))
-        axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(6)
+        axx = QDateTimeAxis()
+        axx.setFormat("HH:mm" if is_intraday else "yy.MM"); axx.setTickCount(6)
         axx.setLabelsFont(QFont("Malgun Gothic", 7))
-        self.osc_chart.addAxis(axx, Qt.AlignBottom)
 
         def add(name, vals, color, width=1, dashed=False):
             s = QLineSeries(); s.setName(name)
+            n = 0
             for x, y in zip(xs, vals):
                 if y is not None:
-                    s.append(x, y)
+                    s.append(x, y); n += 1
+            if n == 0:
+                return None
             pen = s.pen(); pen.setColor(QColor(color)); pen.setWidth(width)
             if dashed:
                 pen.setStyle(Qt.DashLine)
             s.setPen(pen); self.osc_chart.addSeries(s); return s
 
+        made = []
         if C["RSI"].isChecked():
-            r = indicators.rsi(closes)
-            s = add("RSI(14)", r, "#8250df", 1)
-            ay = QValueAxis(); ay.setRange(0, 100); ay.setTickCount(3)
-            ay.setLabelsFont(QFont("Malgun Gothic", 7))
-            self.osc_chart.addAxis(ay, Qt.AlignLeft); s.attachAxis(axx); s.attachAxis(ay)
-            for lvl, cl in ((70, "#cf222e"), (30, "#1f6feb")):
-                g = add(f"{lvl}", [lvl] * len(closes), cl, 1, True)
-                g.attachAxis(axx); g.attachAxis(ay)
-            self.osc_chart.setTitle("RSI(14) · 70↑ 과매수 / 30↓ 과매도")
+            s = add("RSI(14)", indicators.rsi(closes), "#8250df", 1)
+            g70 = add("70", [70.0] * len(closes), "#cf222e", 1, True)
+            g30 = add("30", [30.0] * len(closes), "#1f6feb", 1, True)
+            made = [x for x in (s, g70, g30) if x]
+            if made:
+                ay = QValueAxis(); ay.setRange(0, 100); ay.setTickCount(3)
+                ay.setLabelsFont(QFont("Malgun Gothic", 7))
+                self.osc_chart.addAxis(axx, Qt.AlignBottom)
+                self.osc_chart.addAxis(ay, Qt.AlignLeft)
+                for s in made:
+                    s.attachAxis(axx); s.attachAxis(ay)
+                self.osc_chart.setTitle("RSI(14) · 70↑ 과매수 / 30↓ 과매도")
         elif C["MACD"].isChecked():
-            line, sig, _hist = indicators.macd(closes)
+            line, sig, _h = indicators.macd(closes)
             sl = add("MACD", line, "#0969da", 1)
             ss = add("시그널", sig, "#e16f24", 1)
-            vv = [v for v in line + sig if v is not None]
-            m = (max(abs(min(vv)), abs(max(vv))) if vv else 1) or 1
-            ay = QValueAxis(); ay.setRange(-m, m); ay.setLabelsFont(QFont("Malgun Gothic", 7))
-            self.osc_chart.addAxis(ay, Qt.AlignLeft)
-            for s in (sl, ss):
-                s.attachAxis(axx); s.attachAxis(ay)
-            self.osc_chart.setTitle("MACD(12,26,9)")
+            made = [x for x in (sl, ss) if x]
+            if made:
+                vv = [v for v in line + sig if v is not None]
+                m = (max(abs(min(vv)), abs(max(vv))) if vv else 1) or 1
+                ay = QValueAxis(); ay.setRange(-m, m)
+                ay.setLabelsFont(QFont("Malgun Gothic", 7))
+                self.osc_chart.addAxis(axx, Qt.AlignBottom)
+                self.osc_chart.addAxis(ay, Qt.AlignLeft)
+                for s in made:
+                    s.attachAxis(axx); s.attachAxis(ay)
+                self.osc_chart.setTitle("MACD(12,26,9)")
+        if not made:
+            self.osc_view.setVisible(False); return
         self.osc_chart.setTitleFont(QFont("Malgun Gothic", 8))
         self.osc_view.setVisible(True)
 
