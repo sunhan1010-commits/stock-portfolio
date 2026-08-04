@@ -23,11 +23,19 @@ $setup = Join-Path $PSScriptRoot "installer_output\StockPortfolio_Setup.exe"
 if (-not (Test-Path $setup)) { throw "설치파일 생성 실패" }
 
 Write-Host "== 3) git 커밋/푸시 ==" -ForegroundColor Cyan
-git add version.py installer.iss
-git commit -m "release v$Version" 2>&1 | Select-Object -Last 1
-git push 2>&1 | Select-Object -Last 1
+# 소스 전체를 스테이징(.gitignore가 개인데이터/빌드산출물 제외). version 파일만 커밋하던 버그 수정.
+git add -A
+# git 은 정상 진행 메시지도 stderr로 내보내므로 2>&1 파이프( NativeCommandError→중단 )를 쓰지 않는다.
+$ErrorActionPreference = "Continue"
+git commit -m "release v$Version"
+if ($LASTEXITCODE -ne 0) { Write-Host "  (커밋할 변경이 없음 — 계속 진행)" -ForegroundColor Yellow }
+git push
+if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; throw "git push 실패 (exit $LASTEXITCODE)" }
+$ErrorActionPreference = "Stop"
 
 Write-Host "== 4) GitHub 릴리스 생성 ==" -ForegroundColor Cyan
 if (-not $Notes) { $Notes = "주식 포트폴리오 매니저 v$Version" }
-& $gh release create "v$Version" $setup --title "v$Version" --notes $Notes
+$notesFile = Join-Path $env:TEMP "spm_release_notes.md"
+$Notes | Out-File -FilePath $notesFile -Encoding utf8
+& $gh release create "v$Version" $setup --title "v$Version" --notes-file $notesFile
 Write-Host "`n완료! 릴리스가 게시되었습니다. 기존 사용자는 앱 실행 시 업데이트 안내를 받습니다." -ForegroundColor Green
