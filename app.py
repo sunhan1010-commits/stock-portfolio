@@ -1536,7 +1536,7 @@ class RealtimeTab(QWidget):
         prow = QHBoxLayout()
         prow.setSpacing(4)
         prow.addWidget(QLabel("기간"))
-        for label in ("당일", "1주", "1개월", "3개월", "1년"):
+        for label in ("당일", "1주", "1개월", "3개월", "1년", "5년", "전체"):
             b = QPushButton(label)
             b.setCheckable(True)
             b.setChecked(label == "당일")
@@ -1938,6 +1938,8 @@ class RealtimeTab(QWidget):
                 f"{lp['change']:+,.2f} ({lp['change_pct']:+.2f}%)</span>")
             if period == "당일":
                 self._draw_line(data, lp.get("prev_close"), col)
+            elif period in ("5년", "전체"):
+                self._draw_hist_line(data, col)
             else:
                 self._draw_candles(data)
 
@@ -2020,6 +2022,34 @@ class RealtimeTab(QWidget):
         series.attachAxis(axy)
 
         self.chart.setTitle(f"{cats[0]} ~ {cats[-1]}  (일봉 {len(cats)}개)")
+        self.chart.setTitleFont(QFont("Malgun Gothic", 8))
+
+    def _draw_hist_line(self, data, color_hex):
+        """장기간(5년·전체) 종가 라인. 캔들은 개수가 많아 과밀하므로 라인+다운샘플."""
+        self._clear_chart()
+        if not data:
+            return
+        # 점이 너무 많으면 균등 다운샘플(마지막 점은 유지)
+        step = max(1, len(data) // 800)
+        pts = data[::step]
+        if pts[-1] is not data[-1]:
+            pts.append(data[-1])
+        series = QLineSeries()
+        ys = []
+        for d in pts:
+            ms = QDateTime.fromString(d["date"], "yyyy-MM-dd").toMSecsSinceEpoch()
+            series.append(ms, d["close"]); ys.append(d["close"])
+        pen = series.pen(); pen.setColor(QColor(color_hex)); pen.setWidth(2)
+        series.setPen(pen)
+        self.chart.addSeries(series)
+        axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(7)
+        axx.setLabelsFont(QFont("Malgun Gothic", 8))
+        self.chart.addAxis(axx, Qt.AlignBottom); series.attachAxis(axx)
+        axy = QValueAxis()
+        lo, hi = min(ys), max(ys); pad = (hi - lo) * 0.06 or 1
+        axy.setRange(lo - pad, hi + pad); axy.setLabelsFont(QFont("Malgun Gothic", 8))
+        self.chart.addAxis(axy, Qt.AlignLeft); series.attachAxis(axy)
+        self.chart.setTitle(f"{data[0]['date']} ~ {data[-1]['date']}  (종가 {len(data)}일)")
         self.chart.setTitleFont(QFont("Malgun Gothic", 8))
 
 
@@ -2278,8 +2308,9 @@ class MarketTab(QWidget):
         self.index = QComboBox()
         self.index.addItems(["KOSPI", "KOSDAQ", "S&P500", "나스닥", "다우"])
         self.index.currentTextChanged.connect(self._load)
-        self.period = QComboBox(); self.period.addItems(["3개월", "1년", "3년", "5년"])
-        self.period.setCurrentText("1년")
+        self.period = QComboBox()
+        self.period.addItems(["당일", "3개월", "1년", "3년", "5년", "전체"])
+        self.period.setCurrentText("당일")
         self.period.currentTextChanged.connect(self._load)
         rf = QPushButton("🔄"); rf.clicked.connect(self._load)
         bar.addWidget(QLabel("지수")); bar.addWidget(self.index)
@@ -2294,9 +2325,9 @@ class MarketTab(QWidget):
         self.chart.setMargins(QMargins(4, 4, 4, 4))
         self.cv = QChartView(self.chart); self.cv.setRenderHint(QPainter.Antialiasing)
         lay.addWidget(self.cv, 1)
-        note = QLabel("※ 국내(코스피·코스닥) + 미국(S&P500·나스닥·다우) 지수 추이(무료 지연). "
-                      "국내 지수는 PER·EPS 스냅샷을 함께 표시하며, 미국 지수는 무료 PER·EPS가 "
-                      "제공되지 않아 지수 추이만 보여줍니다.")
+        note = QLabel("※ 국내(코스피·코스닥) + 미국(S&P500·나스닥·다우). ‘당일’은 분봉 실시간 그래프"
+                      "(점선=전일 종가), 그 외 기간은 일봉 추이. 국내 지수는 PER·EPS도 함께 표시, "
+                      "미국 지수는 무료 PER·EPS가 없어 추이만 보여줍니다. (무료 지연 시세)")
         note.setWordWrap(True); note.setStyleSheet("color:#8b949e; font-size:11px;")
         lay.addWidget(note)
         self._loaded = False
@@ -2310,6 +2341,10 @@ class MarketTab(QWidget):
     def _load(self, *_):
         idx = self.index.currentText(); period = self.period.currentText()
         self.stat.setText("불러오는 중…")
+
+        if period == "당일":
+            self._load_intraday(idx)
+            return
 
         def job():
             return datasource.index_history(idx, period), datasource.index_valuation(idx)
@@ -2335,13 +2370,75 @@ class MarketTab(QWidget):
             self.stat.setText(f"조회 실패: {msg}")
         run_async(self, job, done, fail)
 
+    def _load_intraday(self, idx):
+        """당일 분봉(실시간 근접) 지수 그래프."""
+        def job():
+            return datasource.index_intraday(idx), datasource.index_live(idx)
+
+        def done(res):
+            pts, lp = res
+            if not pts:
+                self.stat.setText("장 시작 전이거나 당일 데이터가 아직 없습니다."); return
+            chg = lp.get("change") or 0
+            col = "#cf222e" if chg > 0 else ("#1f6feb" if chg < 0 else "#57606a")
+            price = lp.get("price") or pts[-1][1]
+            self.stat.setText(
+                f"<b>{lp['name']}</b> "
+                f"<span style='font-size:20px; font-weight:800'>{price:,.2f}</span> "
+                f"<span style='color:{col}; font-weight:700'>"
+                f"{chg:+,.2f} ({lp.get('change_pct', 0):+.2f}%)</span> "
+                f"<span style='color:#8b949e; font-size:12px'>· 당일 분봉(무료 지연)</span>")
+            self._draw_intraday(pts, lp.get("prev_close"), col)
+
+        def fail(msg):
+            self.stat.setText(f"조회 실패: {msg}")
+        run_async(self, job, done, fail)
+
+    def _draw_intraday(self, pts, prev_close, color_hex):
+        """당일 분봉 라인 + 전일종가 기준선."""
+        self.chart.removeAllSeries()
+        for ax in list(self.chart.axes()):
+            self.chart.removeAxis(ax)
+        s = QLineSeries(); ys = []
+        for ts, v in pts:
+            ms = QDateTime.fromString(ts, "yyyyMMddHHmmss").toMSecsSinceEpoch()
+            s.append(ms, v); ys.append(v)
+        pen = s.pen(); pen.setColor(QColor(color_hex)); pen.setWidth(2); s.setPen(pen)
+        self.chart.addSeries(s)
+        base = None
+        if prev_close:
+            base = QLineSeries()
+            base.append(s.at(0).x(), prev_close)
+            base.append(s.at(s.count() - 1).x(), prev_close)
+            bp = base.pen(); bp.setColor(QColor("#8b949e")); bp.setWidth(1)
+            bp.setStyle(Qt.DashLine); base.setPen(bp)
+            self.chart.addSeries(base)
+        ax = QDateTimeAxis(); ax.setFormat("HH:mm"); ax.setTickCount(7)
+        ax.setLabelsFont(QFont("Malgun Gothic", 8))
+        self.chart.addAxis(ax, Qt.AlignBottom); s.attachAxis(ax)
+        if base:
+            base.attachAxis(ax)
+        ay = QValueAxis()
+        lo, hi = min(ys), max(ys)
+        if prev_close:
+            lo, hi = min(lo, prev_close), max(hi, prev_close)
+        pad = (hi - lo) * 0.08 or 1
+        ay.setRange(lo - pad, hi + pad); ay.setLabelsFont(QFont("Malgun Gothic", 8))
+        self.chart.addAxis(ay, Qt.AlignLeft); s.attachAxis(ay)
+        if base:
+            base.attachAxis(ay)
+
     def _draw(self, hist, color_hex):
         self.chart.removeAllSeries()
         for ax in list(self.chart.axes()):
             self.chart.removeAxis(ax)
         s = QLineSeries()
         ys = []
-        for ymd, v in hist:
+        step = max(1, len(hist) // 800)   # 전체 등 장기간 다운샘플
+        pts = hist[::step]
+        if hist and pts[-1] is not hist[-1]:
+            pts.append(hist[-1])
+        for ymd, v in pts:
             ms = QDateTime.fromString(ymd, "yyyy-MM-dd").toMSecsSinceEpoch()
             s.append(ms, v); ys.append(v)
         pen = s.pen(); pen.setColor(QColor(color_hex)); pen.setWidth(2); s.setPen(pen)
@@ -2769,10 +2866,16 @@ class IncomeCalcTab(QWidget):
 
 
 # ============================ 메인 윈도우 ============================
+_OPEN_WINDOWS = []   # 보조 창 참조 유지(GC 방지)
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, is_secondary=False, only_pid=None):
         super().__init__()
-        self.setWindowTitle("주식 포트폴리오 매니저")
+        self.is_secondary = is_secondary
+        self._only_pid = only_pid   # 보조 창: 이 프로필만 표시(공유설정 안 건드림)
+        title = "주식 포트폴리오 매니저"
+        self.setWindowTitle(title + ("  ·  새 창" if is_secondary else ""))
         self.resize(1080, 720)
         self.tabs = QTabWidget()
         self.tabs.setMovable(True)
@@ -2780,9 +2883,12 @@ class MainWindow(QMainWindow):
         self.tabs.tabCloseRequested.connect(self._on_tab_close)
         self.portfolio_tabs = {}          # pid -> PortfolioTab
         self.realtime_tabs = {}           # pid -> RealtimeTab
-        self._active_pid = db.current_profile_id()
+        self._active_pid = only_pid or db.current_profile_id()
         self._comp_index = None
-        self._load_open_pids()
+        if only_pid:
+            self.open_pids = [only_pid]
+        else:
+            self._load_open_pids()
         self.screener_tab = ScreenerTab(self)
         self.market_tab = MarketTab(self)
         self.asset_tab = AssetHistoryTab(self)
@@ -2801,12 +2907,36 @@ class MainWindow(QMainWindow):
         # 종목목록(국내+미국)을 백그라운드로 미리 로딩 후 자동완성 설치
         run_async(self, datasource.completer_index,
                   self._on_completer_index, lambda *_: None)
-        # 자동 업데이트 확인(백그라운드, 실패해도 무시)
-        run_async(self, updater.check_latest, self._on_update_found, lambda *_: None)
+        # 자동 업데이트 확인(백그라운드, 실패해도 무시) — 주 창에서만
+        if not is_secondary:
+            run_async(self, updater.check_latest_verbose,
+                      self._on_update_startup, lambda *_: None)
 
-    def _on_update_found(self, info):
-        if not info:
-            return
+    def _on_update_startup(self, info):
+        """시작 시: 새 버전이 있을 때만 조용히 안내(그 외엔 아무 것도 안 함)."""
+        if info and info.get("status") == "update":
+            self._prompt_update(info)
+
+    def _check_update_manual(self):
+        """사용자가 '업데이트 확인'을 눌렀을 때: 모든 결과를 눈에 보이게 안내."""
+        def done(info):
+            st = (info or {}).get("status")
+            if st == "update":
+                self._prompt_update(info)
+            elif st == "latest":
+                QMessageBox.information(
+                    self, "업데이트 확인",
+                    f"이미 최신 버전입니다. (현재 {version.APP_VERSION})")
+            else:
+                QMessageBox.warning(
+                    self, "업데이트 확인 실패",
+                    "업데이트를 확인하지 못했습니다.\n"
+                    f"사유: {(info or {}).get('error', '알 수 없음')}\n\n"
+                    "인터넷 연결을 확인하거나 잠시 후 다시 시도하세요.")
+        QMessageBox.information(self, "업데이트 확인", "최신 버전을 확인하는 중…")
+        run_async(self, updater.check_latest_verbose, done, lambda *_: None)
+
+    def _prompt_update(self, info):
         notes = ("\n\n" + info["notes"][:300]) if info.get("notes") else ""
         ret = QMessageBox.question(
             self, "업데이트 있음",
@@ -2815,6 +2945,9 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No)
         if ret == QMessageBox.Yes:
             if updater.download_and_launch(info["url"]):
+                QMessageBox.information(
+                    self, "업데이트", "설치 관리자를 실행합니다. 앱이 종료된 뒤 "
+                    "설치를 진행하세요.")
                 QApplication.quit()
             else:
                 QMessageBox.warning(self, "업데이트 실패",
@@ -2836,16 +2969,44 @@ class MainWindow(QMainWindow):
         self.open_pids = pids or existing[:]   # 저장값 없으면 전부 열기
 
     def _save_open_pids(self):
+        if getattr(self, "is_secondary", False):
+            return   # 보조 창은 공유 설정(마지막 열린 프로필)을 건드리지 않음
         db.set_setting("open_profiles", ",".join(str(p) for p in self.open_pids))
 
+    def open_in_new_window(self, only_pid=None):
+        """현재 상태와 독립된 새 창을 연다(같은 DB 공유). only_pid 지정 시 그 프로필만."""
+        w = MainWindow(is_secondary=True, only_pid=only_pid)
+        _OPEN_WINDOWS.append(w)
+        w.show()
+        w.raise_()
+        w.activateWindow()
+        return w
+
+    def closeEvent(self, e):
+        try:
+            if self in _OPEN_WINDOWS:
+                _OPEN_WINDOWS.remove(self)
+        except Exception:
+            pass
+        super().closeEvent(e)
+
     def _make_corner_button(self):
+        cont = QWidget()
+        row = QHBoxLayout(cont)
+        row.setContentsMargins(0, 0, 4, 0); row.setSpacing(4)
         btn = QToolButton()
         btn.setText("＋ 프로필")
         btn.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(btn)
         menu.aboutToShow.connect(lambda: self._fill_profile_menu(menu))
         btn.setMenu(menu)
-        self.tabs.setCornerWidget(btn, Qt.TopRightCorner)
+        row.addWidget(btn)
+        winbtn = QToolButton()
+        winbtn.setText("🗗 새 창")
+        winbtn.setToolTip("현재 창과 독립된 새 창 열기(프로필을 나란히 보기)")
+        winbtn.clicked.connect(lambda: self.open_in_new_window())
+        row.addWidget(winbtn)
+        self.tabs.setCornerWidget(cont, Qt.TopRightCorner)
 
     def _fill_profile_menu(self, menu):
         menu.clear()
@@ -2856,7 +3017,16 @@ class MainWindow(QMainWindow):
                 menu.addAction(f"    {p['name']}").triggered.connect(
                     lambda _=False, pid=p["id"]: self._open_profile(pid))
             menu.addSeparator()
+        # 새 창으로 열기(모든 프로필 대상)
+        allp = db.list_profiles()
+        if allp:
+            sub = menu.addMenu("🗗 새 창으로 열기")
+            for p in allp:
+                sub.addAction(p["name"]).triggered.connect(
+                    lambda _=False, pid=p["id"]: self.open_in_new_window(only_pid=pid))
         menu.addAction("＋ 새 프로필…").triggered.connect(self._new_profile_dialog)
+        menu.addSeparator()
+        menu.addAction("⟳ 업데이트 확인").triggered.connect(self._check_update_manual)
 
     def _open_profile(self, pid):
         if pid not in self.open_pids:
@@ -2964,6 +3134,7 @@ def main():
         QTabBar::tab { padding:8px 4px; }
     """)
     w = MainWindow()
+    _OPEN_WINDOWS.append(w)   # 주 창 참조 유지
     w.show()
     sys.exit(app.exec())
 

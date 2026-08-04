@@ -38,3 +38,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "G:\내 드라이브\주식\
 - 함정: PyInstaller `--specpath`를 C드라이브로 주지 말 것(G드라이브 소스와 교차드라이브 오류). 개인 데이터(`portfolio.db`)는 `.gitignore`로 커밋 제외.
 - 함정(PowerShell 5.1): 네이티브 exe(git/gh)에 `2>&1 | ...` 파이프를 쓰면 정상 stderr가 NativeCommandError로 잡혀 `$ErrorActionPreference=Stop`에서 스크립트가 중단됨. release.ps1은 `git push`에 리다이렉트를 쓰지 않고 `$LASTEXITCODE`로 판정하도록 수정됨.
 - 함정: release.ps1은 `git add -A`로 소스 전체를 커밋해야 함(과거 version 파일만 커밋해 기능 소스가 릴리스 커밋에 누락된 버그가 있었음 — 수정 완료).
+- 함정(인코딩, 중요): PowerShell 5.1의 `Get-Content`/`Set-Content` 기본 인코딩은 UTF-8 파일(한글 주석·AppName)을 깨뜨린다. 실제로 이 방식이 `installer.iss`·`version.py`의 한글을 망가뜨려 **설치 마법사 글자가 전부 깨진** 버그가 있었음. release.ps1은 이제 .NET `[System.IO.File]::ReadAllText/WriteAllText`(UTF8, 원본 BOM 유지)로 버전만 교체한다. `installer.iss`는 반드시 **UTF-8 BOM**으로 저장할 것(Inno Setup 6은 BOM 있어야 UTF-8로 해석; 없으면 시스템 ANSI=CP949로 읽어 한글 깨짐). 편집 후 `ISCC` 컴파일이 통과해도 인코딩 깨짐은 잡히지 않으니 바이트로 BOM/한글을 검증할 것.

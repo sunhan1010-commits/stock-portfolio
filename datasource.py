@@ -478,8 +478,11 @@ def index_history(index="KOSPI", period="1년"):
     from datetime import datetime, timedelta
     days = {"3개월": 100, "1년": 400, "3년": 1150, "5년": 1900}.get(period, 400)
     symbol = _INDEX_SYMBOLS.get(index, ("KS11", "KRW"))[0]
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    df = fdr.DataReader(symbol, start)
+    if period == "전체":
+        df = fdr.DataReader(symbol)
+    else:
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(symbol, start)
     out = []
     for idx, row in df.iterrows():
         try:
@@ -667,20 +670,92 @@ def intraday(market: str, code: str):
     return pts
 
 
+# 미국 지수 yfinance 티커
+_INDEX_YF = {"S&P500": "^GSPC", "나스닥": "^IXIC", "다우": "^DJI"}
+
+
+def index_intraday(index="KOSPI"):
+    """지수 당일 분봉 -> [(ts 'YYYYMMDDHHMMSS', value), ...]. KR=네이버 지수분봉, US=yfinance."""
+    pts = []
+    if index in ("KOSPI", "KOSDAQ"):
+        r = requests.get(
+            f"https://api.stock.naver.com/chart/domestic/index/{index}/minute?minuteUnit=5",
+            headers=_HEADERS, timeout=8)
+        for it in r.json():
+            ts, pr = it.get("localDateTime"), it.get("currentPrice")
+            if ts and pr is not None:
+                pts.append((str(ts), float(pr)))
+    else:
+        import yfinance as yf
+        h = yf.Ticker(_INDEX_YF.get(index, "^GSPC")).history(
+            period="1d", interval="1m")
+        for idx, row in h.iterrows():
+            try:
+                c = float(row["Close"])
+                if c == c:
+                    pts.append((idx.strftime("%Y%m%d%H%M%S"), c))
+            except Exception:
+                pass
+    return pts
+
+
+def index_live(index="KOSPI"):
+    """지수 현재값/등락 -> {name, price, change, change_pct, prev_close}."""
+    name = _INDEX_NAMES.get(index, index)
+    if index in ("KOSPI", "KOSDAQ"):
+        r = requests.get(
+            f"https://m.stock.naver.com/api/index/{index}/price?pageSize=2",
+            headers=_HEADERS, timeout=8)
+        d = r.json()[0]
+        price = _to_float(d.get("closePrice"))
+        chg = abs(_to_float(d.get("compareToPreviousClosePrice")) or 0.0)
+        pct = abs(_to_float(d.get("fluctuationsRatio")) or 0.0)
+        if (d.get("compareToPreviousPrice") or {}).get("name") == "FALLING":
+            chg, pct = -chg, -pct
+        prev = (price - chg) if price is not None else None
+        return {"name": name, "price": price, "change": chg,
+                "change_pct": pct, "prev_close": prev}
+    import yfinance as yf
+    fi = yf.Ticker(_INDEX_YF.get(index, "^GSPC")).fast_info
+
+    def g(*keys):
+        for k in keys:
+            try:
+                v = fi[k]
+            except Exception:
+                v = None
+            if v:
+                return float(v)
+        return None
+    price = g("lastPrice", "last_price")
+    prev = g("previousClose", "previous_close", "regularMarketPreviousClose")
+    chg = (price - prev) if (price and prev) else 0.0
+    pct = (chg / prev * 100) if prev else 0.0
+    return {"name": name, "price": price, "change": chg,
+            "change_pct": pct, "prev_close": prev}
+
+
 def history(market: str, code: str, period: str):
-    """일봉 OHLC 시계열. period: '1주'/'1개월'/'3개월'/'1년'. KR·US 모두 FDR 사용."""
+    """일봉 OHLC 시계열. period: '1주'/'1개월'/'3개월'/'1년'/'3년'/'5년'/'전체'. KR·US 모두 FDR."""
     import FinanceDataReader as fdr
     from datetime import datetime, timedelta
-    days = {"1주": 12, "1개월": 40, "3개월": 110, "1년": 400}.get(period, 40)
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    df = fdr.DataReader(code, start)
+    days = {"1주": 12, "1개월": 40, "3개월": 110, "1년": 400,
+            "3년": 1150, "5년": 1900}.get(period, 40)
+    if period == "전체":
+        df = fdr.DataReader(code)        # 상장 이후 전체
+    else:
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(code, start)
     out = []
     for idx, row in df.iterrows():
         try:
+            c = float(row["Close"])
+            if c != c or c <= 0:          # NaN(오늘 미체결)·이상치 제외
+                continue
             out.append({
                 "date": idx.strftime("%Y-%m-%d"),
                 "open": float(row["Open"]), "high": float(row["High"]),
-                "low": float(row["Low"]), "close": float(row["Close"]),
+                "low": float(row["Low"]), "close": c,
             })
         except Exception:
             pass

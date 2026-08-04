@@ -12,10 +12,20 @@ Set-Location -Path $PSScriptRoot
 $gh = "C:\Program Files\GitHub CLI\gh.exe"
 
 Write-Host "== 1) 버전 갱신 -> $Version ==" -ForegroundColor Cyan
-(Get-Content version.py)  -replace 'APP_VERSION\s*=\s*"[^"]*"', "APP_VERSION = `"$Version`"" |
-  Set-Content version.py -Encoding utf8
-(Get-Content installer.iss) -replace 'AppVersion=.*', "AppVersion=$Version" |
-  Set-Content installer.iss -Encoding utf8
+# PowerShell 5.1의 Get-Content/Set-Content 기본 인코딩은 UTF-8 파일(한글 주석/AppName)을
+# 깨뜨린다. .NET으로 UTF-8(BOM 유지) 읽기/쓰기 → 한글 보존.
+function Update-VersionFile($path, $pattern, $replacement) {
+  $full = Join-Path $PSScriptRoot $path
+  $hasBom = $false
+  $bytes = [System.IO.File]::ReadAllBytes($full)
+  if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $hasBom = $true }
+  $text = [System.IO.File]::ReadAllText($full, [System.Text.Encoding]::UTF8)  # BOM 자동 인식/제거
+  $text = [regex]::Replace($text, $pattern, $replacement)
+  $enc = New-Object System.Text.UTF8Encoding($hasBom)   # 원본에 BOM 있었으면 유지
+  [System.IO.File]::WriteAllText($full, $text, $enc)
+}
+Update-VersionFile "version.py"    'APP_VERSION\s*=\s*"[^"]*"' "APP_VERSION = `"$Version`""
+Update-VersionFile "installer.iss" 'AppVersion=.*'             "AppVersion=$Version"
 
 Write-Host "== 2) 설치파일 빌드 ==" -ForegroundColor Cyan
 & "$PSScriptRoot\build_installer.ps1"

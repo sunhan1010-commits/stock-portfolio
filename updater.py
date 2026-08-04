@@ -24,33 +24,42 @@ def _ver_tuple(s):
     return tuple(int(x) for x in nums[:4]) or (0,)
 
 
-def check_latest():
-    """최신 릴리스 확인 -> {'version','url','notes'} 또는 None."""
+def check_latest_verbose():
+    """최신 릴리스 확인 -> 상태 dict.
+    {'status': 'update'|'latest'|'error', ...}
+      update: version,url,notes  /  latest: current,latest  /  error: error"""
     if not GITHUB_REPO or GITHUB_REPO == "OWNER/REPO":
-        return None
+        return {"status": "error", "error": "업데이트 저장소가 설정되지 않았습니다."}
     try:
         r = requests.get(
             f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
             headers=_HEADERS, timeout=8)
         if r.status_code != 200:
-            return None
+            return {"status": "error",
+                    "error": f"GitHub 응답 오류 ({r.status_code})"}
         d = r.json()
         tag = d.get("tag_name") or d.get("name") or ""
+        latest = tag.lstrip("vV")
         if _ver_tuple(tag) <= _ver_tuple(APP_VERSION):
-            return None
-        # .exe 에셋 찾기
+            return {"status": "latest", "current": APP_VERSION, "latest": latest}
         url = None
         for a in d.get("assets", []):
-            name = (a.get("name") or "").lower()
-            if name.endswith(".exe"):
+            if (a.get("name") or "").lower().endswith(".exe"):
                 url = a.get("browser_download_url")
                 break
         if not url:
-            return None
-        return {"version": tag.lstrip("vV"), "url": url,
+            return {"status": "error",
+                    "error": "새 버전은 있으나 설치파일(.exe)이 아직 없습니다."}
+        return {"status": "update", "version": latest, "url": url,
                 "notes": (d.get("body") or "").strip()}
-    except Exception:
-        return None
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def check_latest():
+    """최신 릴리스가 현재보다 높으면 {'version','url','notes'}, 아니면 None(하위호환)."""
+    info = check_latest_verbose()
+    return info if info.get("status") == "update" else None
 
 
 def download_and_launch(url: str) -> bool:
