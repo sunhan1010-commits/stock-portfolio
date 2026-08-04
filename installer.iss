@@ -1,16 +1,16 @@
-; 주식 포트폴리오 매니저 - Inno Setup 설치 스크립트
-; 컴파일: ISCC.exe /DDISTDIR="<빌드 dist 경로>" installer.iss  (build_installer.ps1 이 자동 수행)
+﻿; 二쇱떇 ?ы듃?대━??留ㅻ땲? - Inno Setup ?ㅼ튂 ?ㅽ겕由쏀듃
+; 而댄뙆?? ISCC.exe /DDISTDIR="<鍮뚮뱶 dist 寃쎈줈>" installer.iss  (build_installer.ps1 ???먮룞 ?섑뻾)
 #ifndef DISTDIR
   #define DISTDIR "dist\StockPortfolio"
 #endif
 
 [Setup]
 AppId={{9E7B2C40-5B49-4363-8914-596246B624DA}
-AppName=주식 포트폴리오 매니저
-AppVersion=1.1.0
+AppName=二쇱떇 ?ы듃?대━??留ㅻ땲?
+AppVersion=1.2.0
 AppPublisher=Stock Portfolio Manager
 DefaultDirName={autopf}\StockPortfolio
-DefaultGroupName=주식 포트폴리오 매니저
+DefaultGroupName=二쇱떇 ?ы듃?대━??留ㅻ땲?
 DisableProgramGroupPage=yes
 OutputDir=installer_output
 OutputBaseFilename=StockPortfolio_Setup
@@ -26,15 +26,15 @@ PrivilegesRequired=lowest
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
-Name: desktopicon; Description: "바탕화면 바로가기 생성"; GroupDescription: "추가 아이콘:"
+Name: desktopicon; Description: "諛뷀깢?붾㈃ 諛붾줈媛湲??앹꽦"; GroupDescription: "異붽? ?꾩씠肄?"
 
 [Files]
 Source: "{#DISTDIR}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 [Icons]
-Name: "{group}\주식 포트폴리오 매니저"; Filename: "{app}\StockPortfolio.exe"
-Name: "{group}\주식 포트폴리오 매니저 제거"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\주식 포트폴리오 매니저"; Filename: "{app}\StockPortfolio.exe"; Tasks: desktopicon
+Name: "{group}\二쇱떇 ?ы듃?대━??留ㅻ땲?"; Filename: "{app}\StockPortfolio.exe"
+Name: "{group}\二쇱떇 ?ы듃?대━??留ㅻ땲? ?쒓굅"; Filename: "{uninstallexe}"
+Name: "{userdesktop}\二쇱떇 ?ы듃?대━??留ㅻ땲?"; Filename: "{app}\StockPortfolio.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\StockPortfolio.exe"; Description: "지금 실행"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\StockPortfolio.exe"; Description: "吏湲??ㅽ뻾"; Flags: nowait postinstall skipifsilent
