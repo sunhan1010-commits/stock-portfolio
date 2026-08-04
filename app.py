@@ -122,6 +122,82 @@ def run_async(parent, fn, on_done, on_fail=None, *args, **kwargs):
     QThreadPool.globalInstance().start(_AsyncTask(fn, args, kwargs, signals))
 
 
+# ============================ 줌 가능한 차트뷰 ============================
+class ZoomableChartView(QChartView):
+    """마우스 휠=확대/축소, 왼쪽 드래그=박스 확대, 오른쪽 드래그=이동, 더블클릭=원래대로."""
+    def __init__(self, chart=None, parent=None):
+        if chart is not None:
+            super().__init__(chart, parent)
+        else:
+            super().__init__(parent)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setRubberBand(QChartView.RectangleRubberBand)
+        self._pan_last = None
+
+    def wheelEvent(self, e):
+        ch = self.chart()
+        if ch is not None:
+            ch.zoom(1.25 if e.angleDelta().y() > 0 else 0.8)
+            e.accept()
+        else:
+            super().wheelEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        ch = self.chart()
+        if ch is not None:
+            ch.zoomReset()
+        super().mouseDoubleClickEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.RightButton:
+            self._pan_last = e.position()
+            self.setCursor(Qt.ClosedHandCursor)
+            e.accept(); return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._pan_last is not None and self.chart() is not None:
+            d = e.position() - self._pan_last
+            self._pan_last = e.position()
+            self.chart().scroll(-d.x(), d.y())
+            e.accept(); return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.RightButton and self._pan_last is not None:
+            self._pan_last = None
+            self.unsetCursor()
+            e.accept(); return
+        super().mouseReleaseEvent(e)
+
+
+class ChartZoomDialog(QDialog):
+    """차트를 큰 창으로 옮겨 크게 보기(닫으면 원래 위치로 되돌림)."""
+    def __init__(self, parent, chart, restore_view, title="차트 크게 보기"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(1000, 640)
+        self._chart = chart
+        self._restore_view = restore_view
+        lay = QVBoxLayout(self)
+        hint = QLabel("휠=확대/축소 · 왼쪽 드래그=박스 확대 · 오른쪽 드래그=이동 · 더블클릭=원래대로")
+        hint.setStyleSheet("color:#8b949e; font-size:11px;")
+        lay.addWidget(hint)
+        self.view = ZoomableChartView(chart)   # chart 를 이 뷰로 이동
+        lay.addWidget(self.view, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.button(QDialogButtonBox.Close).clicked.connect(self.accept)
+        lay.addWidget(bb)
+
+    def closeEvent(self, e):
+        # 차트를 원래 뷰로 되돌린다
+        try:
+            self._restore_view.setChart(self._chart)
+        except Exception:
+            pass
+        super().closeEvent(e)
+
+
 # ============================ 지표 배지 위젯 ============================
 class MetricCard(QFrame):
     def __init__(self, ev: dict):
@@ -1562,17 +1638,18 @@ class RealtimeTab(QWidget):
         self.chart = QChart()
         self.chart.legend().hide()
         self.chart.setMargins(QMargins(4, 4, 4, 4))
-        self.chart_view = QChartView(self.chart)
-        self.chart_view.setRenderHint(QPainter.Antialiasing)
-        self.chart_view.setMinimumHeight(240)
+        self.chart_view = ZoomableChartView(self.chart)
+        self.chart_view.setMinimumHeight(300)
         rlay.addWidget(self.chart_view)
+        zhint = QLabel("🔍 휠=확대/축소 · 드래그=구간확대 · 우클릭드래그=이동 · 더블클릭=원래대로")
+        zhint.setStyleSheet("color:#8b949e; font-size:10px;")
+        rlay.addWidget(zhint)
 
         # 보조지표(RSI/MACD) 창 — 필요할 때만 표시
         self.osc_chart = QChart()
         self.osc_chart.setMargins(QMargins(4, 0, 4, 0))
-        self.osc_view = QChartView(self.osc_chart)
-        self.osc_view.setRenderHint(QPainter.Antialiasing)
-        self.osc_view.setMaximumHeight(150)
+        self.osc_view = ZoomableChartView(self.osc_chart)
+        self.osc_view.setMaximumHeight(160)
         self.osc_view.setVisible(False)
         rlay.addWidget(self.osc_view)
 
@@ -1585,10 +1662,14 @@ class RealtimeTab(QWidget):
         self.detail_btn.setEnabled(False)
         self.detail_btn.setToolTip("목표주가·마진·성장률·재무안정성 등 확장 데이터셋 보기")
         self.detail_btn.clicked.connect(self._show_detail)
+        big_btn = QPushButton("⤢ 크게 보기")
+        big_btn.setToolTip("차트를 큰 창으로 열어 확대/이동해서 보기")
+        big_btn.clicked.connect(self._open_big_chart)
         help_btn = QPushButton("ⓘ 지표 설명")
         help_btn.clicked.connect(lambda: MetricsHelpDialog(self).exec())
         actrow.addWidget(self.add_port_btn)
         actrow.addWidget(self.detail_btn)
+        actrow.addWidget(big_btn)
         actrow.addWidget(help_btn)
         actrow.addStretch()
         rlay.addLayout(actrow)
@@ -2020,6 +2101,16 @@ class RealtimeTab(QWidget):
             self._load_chart(*self.selected)
         else:
             self._clear_osc()
+
+    def _open_big_chart(self):
+        if not self.chart.series():
+            QMessageBox.information(self, "안내", "먼저 종목을 선택해 차트를 표시하세요.")
+            return
+        title = getattr(self, "_view_name", None) or "차트"
+        dlg = ChartZoomDialog(self, self.chart, self.chart_view,
+                              title=f"{title} · 크게 보기")
+        dlg.exec()
+        self.chart_view.setChart(self.chart)   # 닫힌 뒤 원래 뷰로 확실히 복귀
 
     def _clear_chart(self):
         self.chart.removeAllSeries()
@@ -2652,12 +2743,19 @@ class MarketTab(QWidget):
         self.stack.addWidget(gscroll)
 
         single = QWidget(); sv = QVBoxLayout(single)
+        srow = QHBoxLayout()
         self.stat = QLabel("불러오는 중…"); self.stat.setTextFormat(Qt.RichText)
-        sv.addWidget(self.stat)
+        srow.addWidget(self.stat, 1)
+        big = QPushButton("⤢ 크게 보기"); big.clicked.connect(self._open_big_chart)
+        srow.addWidget(big)
+        sv.addLayout(srow)
         self.chart = QChart(); self.chart.legend().hide()
         self.chart.setMargins(QMargins(4, 4, 4, 4))
-        self.cv = QChartView(self.chart); self.cv.setRenderHint(QPainter.Antialiasing)
+        self.cv = ZoomableChartView(self.chart)
         sv.addWidget(self.cv, 1)
+        zh = QLabel("🔍 휠=확대/축소 · 드래그=구간확대 · 우클릭드래그=이동 · 더블클릭=원래대로")
+        zh.setStyleSheet("color:#8b949e; font-size:10px;")
+        sv.addWidget(zh)
         self.stack.addWidget(single)
         lay.addWidget(self.stack, 1)
 
@@ -2782,6 +2880,14 @@ class MarketTab(QWidget):
             self.stat.setText(f"조회 실패: {msg}")
         run_async(self, job, done, fail)
 
+    def _open_big_chart(self):
+        if not self.chart.series():
+            QMessageBox.information(self, "안내", "먼저 종목을 표시하세요."); return
+        dlg = ChartZoomDialog(self, self.chart, self.cv,
+                              title=f"{self.item.currentText()} · 크게 보기")
+        dlg.exec()
+        self.cv.setChart(self.chart)
+
     def _draw_intraday(self, pts, prev_close, color_hex):
         """당일 분봉 라인 + 전일종가 기준선."""
         self.chart.removeAllSeries()
@@ -2874,10 +2980,10 @@ class AssetHistoryTab(QWidget):
 
         self.chart = QChart()
         self.chart.setMargins(QMargins(4, 4, 4, 4))
-        self.cv = QChartView(self.chart); self.cv.setRenderHint(QPainter.Antialiasing)
+        self.cv = ZoomableChartView(self.chart)
         lay.addWidget(self.cv, 1)
         self.status = QLabel("‘📸 지금 자산 기록’으로 시점을 저장하면 추이가 그려집니다. "
-                             "분기·연도별로 자산 변화를 비교하세요.")
+                             "분기·연도별로 자산 변화를 비교하세요. (휠=확대, 우클릭드래그=이동, 더블클릭=원래대로)")
         self.status.setStyleSheet("color:#8b949e; font-size:11px;")
         lay.addWidget(self.status)
 
