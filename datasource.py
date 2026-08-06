@@ -348,6 +348,11 @@ def _fetch_us(ticker: str) -> dict:
     def _pct(v):
         return v * 100.0 if v is not None else None
 
+    # 배당 성장률(전년比 추정): 선행 연배당 ÷ 후행 연배당 - 1
+    _fwd_dr = info.get("dividendRate")
+    _tr_dr = info.get("trailingAnnualDividendRate")
+    _div_growth = ((_fwd_dr / _tr_dr - 1) * 100.0) if (_fwd_dr and _tr_dr) else None
+
     return {
         "market": "US",
         "code": ticker,
@@ -367,6 +372,8 @@ def _fetch_us(ticker: str) -> dict:
         "wk52_high": info.get("fiftyTwoWeekHigh"),
         "wk52_low": info.get("fiftyTwoWeekLow"),
         "sector": info.get("sector"),
+        "div_growth": _div_growth,
+        "div_5y_avg_yield": info.get("fiveYearAvgDividendYield"),
         # --- 상세 데이터셋(선택 표시) ---
         "open": info.get("open") or info.get("regularMarketOpen"),
         "high": info.get("dayHigh"),

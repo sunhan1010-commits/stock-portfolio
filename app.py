@@ -371,6 +371,8 @@ def detail_sections(q):
         ]),
         ("배당", [
             ("배당수익률", pct(q.get("div_yield"))),
+            ("배당 성장률(전년比·추정)", pct(q.get("div_growth"))),
+            ("5년 평균 배당수익률", pct(q.get("div_5y_avg_yield"))),
             ("주당배당금(DPS)", money(q.get("dps"))),
             ("배당성향", pct(q.get("payout_ratio"))),
         ]),
