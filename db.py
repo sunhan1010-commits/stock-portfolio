@@ -27,7 +27,8 @@ if (not os.path.exists(DB_PATH) and os.path.exists(_OLD_DB)
 KINDS = ["주식", "ETF", "적금", "예금", "현금", "기타"]
 
 _HOLDING_COLS = ("kind", "market", "code", "name", "qty", "avg_price",
-                 "amount", "currency", "memo", "sort", "included", "principal")
+                 "amount", "currency", "memo", "sort", "included", "principal",
+                 "buy_date")
 
 
 def _conn():
@@ -108,6 +109,8 @@ def init():
             c.execute("ALTER TABLE holdings ADD COLUMN included INTEGER DEFAULT 1")
         if "principal" not in cols:
             c.execute("ALTER TABLE holdings ADD COLUMN principal REAL DEFAULT 0")
+        if "buy_date" not in cols:
+            c.execute("ALTER TABLE holdings ADD COLUMN buy_date TEXT DEFAULT ''")
         pcols = [r["name"] for r in c.execute("PRAGMA table_info(profiles)")]
         if "style" not in pcols:
             c.execute("ALTER TABLE profiles ADD COLUMN style TEXT DEFAULT '나이 기준'")

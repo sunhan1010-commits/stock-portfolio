@@ -722,6 +722,8 @@ class HoldingDialog(QDialog):
         self.principal.setRange(0, 1e15); self.principal.setDecimals(0)
         self.principal.setGroupSeparatorShown(True)
         self.principal.setValue(float(data.get("principal") or 0))
+        self.buy_date = QLineEdit(data.get("buy_date", ""))
+        self.buy_date.setPlaceholderText("YYYY-MM-DD (선택 · 기존 보유분 매수일)")
         self.memo = QLineEdit(data.get("memo", ""))
         self.included = QCheckBox("포트폴리오 계산(총액·비중)에 포함")
         self.included.setChecked(bool(data.get("included", 1)))
@@ -733,6 +735,7 @@ class HoldingDialog(QDialog):
         form.addRow("통화", self.currency)
         form.addRow("수량", self.qty)
         form.addRow("평균 매입단가", self.avg)
+        form.addRow("매수일 (선택)", self.buy_date)
         form.addRow("금액 (현재 잔액/평가금액)", self.amount)
         form.addRow("투입원금 (원화, 선택)", self.principal)
         form.addRow("메모", self.memo)
@@ -759,7 +762,7 @@ class HoldingDialog(QDialog):
         sec = self._is_security()
         kind = self.kind.currentText()
         # 관련 없는 입력칸은 아예 숨긴다
-        for w in (self.row_code, self.qty, self.avg):
+        for w in (self.row_code, self.qty, self.avg, self.buy_date):
             self._form.setRowVisible(w, sec)
         self._form.setRowVisible(self.amount, not sec)
         self._form.setRowVisible(self.principal, not sec)   # 투입원금(현금류만)
@@ -826,6 +829,7 @@ class HoldingDialog(QDialog):
             "sort": 0,
             "included": 1 if self.included.isChecked() else 0,
             "principal": 0 if sec else self.principal.value(),
+            "buy_date": self.buy_date.text().strip() if sec else "",
         }
 
 
@@ -1037,6 +1041,7 @@ class RebalanceDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        saved = self._load_targets()
         self.tgt_spins = []
         for i, x in enumerate(self.items):
             r = x["row"]
@@ -1044,7 +1049,9 @@ class RebalanceDialog(QDialog):
             self.table.setItem(i, 1, QTableWidgetItem(f"{x['krw']:,.0f}원"))
             self.table.setItem(i, 2, QTableWidgetItem(f"{x['krw']/self.total*100:.1f}%"))
             sp = QDoubleSpinBox(); sp.setRange(0, 100); sp.setDecimals(1); sp.setSuffix(" %")
-            sp.setValue(round(x["krw"] / self.total * 100, 1))
+            key = self._key(r)
+            sp.setValue(saved[key] if key in saved
+                        else round(x["krw"] / self.total * 100, 1))
             sp.valueChanged.connect(self._recalc)
             self.table.setCellWidget(i, 3, sp); self.tgt_spins.append(sp)
             self.table.setItem(i, 4, QTableWidgetItem("-"))
@@ -1064,6 +1071,25 @@ class RebalanceDialog(QDialog):
         bb.button(QDialogButtonBox.Close).clicked.connect(self.accept)
         lay.addWidget(bb)
         self._recalc()
+
+    def _key(self, r):
+        if r.get("kind") in ("주식", "ETF"):
+            return f"{r.get('market')}:{r.get('code')}"
+        return f"{r.get('kind')}:{r.get('name')}"
+
+    def _skey(self):
+        return f"rebalance_targets_{self.pt.profile_id}"
+
+    def _load_targets(self):
+        try:
+            return json.loads(db.get_setting(self._skey()) or "{}")
+        except Exception:
+            return {}
+
+    def _save_targets(self):
+        data = {self._key(x["row"]): round(self.tgt_spins[i].value(), 1)
+                for i, x in enumerate(self.items)}
+        db.set_setting(self._skey(), json.dumps(data, ensure_ascii=False))
 
     def _preset_equal(self):
         n = len(self.items) or 1
@@ -1100,7 +1126,11 @@ class RebalanceDialog(QDialog):
             self.table.item(i, 5).setForeground(QColor(c))
         warn = "" if abs(tot_t - 100) < 0.5 else \
             f" <span style='color:#cf222e'>(목표 합계 {tot_t:.1f}% — 100%로 맞추세요)</span>"
-        self.sum_lbl.setText(f"목표 합계 <b>{tot_t:.1f}%</b>{warn}")
+        self.sum_lbl.setText(
+            f"목표 합계 <b>{tot_t:.1f}%</b>{warn} "
+            f"<span style='color:#8b949e; font-size:11px'>· 목표비율은 자동 저장됩니다</span>")
+        if self.tgt_spins:
+            self._save_targets()
 
 
 class PortfolioTab(QWidget):
@@ -3116,7 +3146,8 @@ class AssetHistoryTab(QWidget):
             self.checks_bar.insertWidget(self.checks_bar.count() - 1, cb)
             self.checks[p["id"]] = cb
 
-    def _snapshot(self):
+    def _save_snapshots(self):
+        """열린 포트폴리오들의 현재 평가액을 오늘 날짜로 저장(하루 1건 덮어쓰기). 저장 수 반환."""
         today = QDateTime.currentDateTime().toString("yyyy-MM-dd")
         n = 0
         for pid, pt in self.main.portfolio_tabs.items():
@@ -3129,6 +3160,11 @@ class AssetHistoryTab(QWidget):
             bd = json.dumps(getattr(pt, "_last_breakdown", {}) or {}, ensure_ascii=False)
             db.add_snapshot(pid, today, total, inv, pnl, breakdown=bd, ret=ret)
             n += 1
+        return n
+
+    def _snapshot(self):
+        today = QDateTime.currentDateTime().toString("yyyy-MM-dd")
+        n = self._save_snapshots()
         self.status.setText(f"{today} 기준 {n}개 포트폴리오 자산 기록 완료.")
         self._render()
 
@@ -3268,18 +3304,29 @@ class IncomeCalcTab(QWidget):
         self.main = main
         self.rows = []       # [(name_edit, pct_spin, amt_spin)]
         self._sync = False   # 재귀 갱신 방지
-        self._loading = False  # 프로필 불러오는 중엔 저장 안 함
+        self._loading = False  # 불러오는 중엔 저장 안 함
+        self._plans = []     # 현재 프로필의 배분방식 목록
+        self._cur_idx = 0
         lay = QVBoxLayout(self)
         pbar = QHBoxLayout()
         pbar.addWidget(QLabel("프로필"))
-        self.profile = QComboBox(); self.profile.setMinimumWidth(160)
+        self.profile = QComboBox(); self.profile.setMinimumWidth(150)
         self.profile.currentIndexChanged.connect(self._on_profile_changed)
         pbar.addWidget(self.profile)
-        pinfo = QLabel("계획은 선택한 프로필에 자동 저장됩니다.")
-        pinfo.setStyleSheet("color:#8b949e; font-size:11px;")
-        pbar.addWidget(pinfo)
+        pbar.addWidget(QLabel("내 배분방식"))
+        self.saved_combo = QComboBox(); self.saved_combo.setMinimumWidth(150)
+        self.saved_combo.currentIndexChanged.connect(self._on_saved_changed)
+        pbar.addWidget(self.saved_combo)
+        nb = QPushButton("＋ 새로"); nb.setToolTip("현재 표를 새 배분방식으로 저장")
+        nb.clicked.connect(self._new_plan)
+        rb = QPushButton("✎ 이름"); rb.clicked.connect(self._rename_plan)
+        xb = QPushButton("🗑"); xb.clicked.connect(self._del_plan)
+        pbar.addWidget(nb); pbar.addWidget(rb); pbar.addWidget(xb)
         pbar.addStretch()
         lay.addLayout(pbar)
+        pinfo = QLabel("배분방식은 프로필별로 자동 저장됩니다. ‘＋ 새로’로 여러 개 만들고 이름도 바꿀 수 있어요.")
+        pinfo.setStyleSheet("color:#8b949e; font-size:11px;")
+        lay.addWidget(pinfo)
         top = QHBoxLayout()
         top.addWidget(QLabel("월 소득(원)"))
         self.income = QDoubleSpinBox(); self.income.setRange(0, 1e12)
@@ -3287,7 +3334,7 @@ class IncomeCalcTab(QWidget):
         self.income.setValue(3000000)
         self.income.valueChanged.connect(self._income_changed)
         top.addWidget(self.income)
-        top.addWidget(QLabel("배분방식"))
+        top.addWidget(QLabel("빠른 채우기"))
         self.preset = QComboBox(); self.preset.addItems(list(self.PRESETS.keys()))
         self.preset.currentTextChanged.connect(self._apply_preset)
         top.addWidget(self.preset)
@@ -3322,7 +3369,7 @@ class IncomeCalcTab(QWidget):
         self._rebuild_profiles()
 
     def _rebuild_profiles(self):
-        """프로필 목록을 다시 채우고 현재 프로필 계획을 불러온다."""
+        """프로필 목록을 다시 채우고 현재 프로필의 배분방식들을 불러온다."""
         self._loading = True
         prev = self.profile.currentData()
         self.profile.blockSignals(True)
@@ -3330,14 +3377,13 @@ class IncomeCalcTab(QWidget):
         profs = db.list_profiles()
         for p in profs:
             self.profile.addItem(p["name"], p["id"])
-        # 이전 선택 유지, 없으면 활성 프로필
         target = prev if prev in [p["id"] for p in profs] else self.main.active_profile_id()
         idx = self.profile.findData(target)
         if idx >= 0:
             self.profile.setCurrentIndex(idx)
         self.profile.blockSignals(False)
         self._loading = False
-        self._load_plan()
+        self._load_profile_plans()
 
     def _current_pid(self):
         pid = self.profile.currentData()
@@ -3345,47 +3391,128 @@ class IncomeCalcTab(QWidget):
 
     def _on_profile_changed(self, *_):
         if not self._loading:
-            self._load_plan()
+            self._load_profile_plans()
 
-    def _load_plan(self):
-        """선택 프로필의 저장된 배분 계획을 불러온다(없으면 기본 프리셋)."""
-        self._loading = True
-        raw = db.get_setting(f"income_plan_{self._current_pid()}")
-        plan = None
+    # --- 배분방식(프로필별 다중 저장) ---
+    def _read_plans(self, pid):
+        raw = db.get_setting(f"income_plans_{pid}")
         if raw:
             try:
-                plan = json.loads(raw)
+                d = json.loads(raw)
+                plans = d.get("plans") or []
+                if plans:
+                    cur = max(0, min(int(d.get("current", 0)), len(plans) - 1))
+                    return plans, cur
             except Exception:
-                plan = None
-        if not plan or not plan.get("items"):
-            self.profile.setToolTip("")
-            self._loading = False
-            self._apply_preset("균형형 (기본)")
-            return
-        self.income.blockSignals(True)
-        self.income.setValue(plan.get("income", 3000000))
-        self.income.blockSignals(False)
-        self.preset.blockSignals(True)
-        self.preset.setCurrentText(plan.get("preset", "직접입력"))
-        self.preset.blockSignals(False)
-        self.table.setRowCount(0)
-        self.rows = []
-        for it in plan["items"]:
-            self._add_row(it.get("name", ""), it.get("pct", 0), mark_custom=False)
+                pass
+        # 옛 단일 계획 마이그레이션
+        old = db.get_setting(f"income_plan_{pid}")
+        if old:
+            try:
+                p = json.loads(old)
+                if p.get("items"):
+                    return [{"name": "배분방식 1",
+                             "income": p.get("income", 3000000),
+                             "items": p["items"]}], 0
+            except Exception:
+                pass
+        # 기본 배분방식
+        return [{"name": "배분방식 1", "income": 3000000,
+                 "items": [{"name": c, "pct": v}
+                           for c, v in zip(self.CATS, self.PRESETS["균형형 (기본)"])]}], 0
+
+    def _persist(self):
+        db.set_setting(f"income_plans_{self._current_pid()}",
+                       json.dumps({"plans": self._plans, "current": self._cur_idx},
+                                  ensure_ascii=False))
+
+    def _load_profile_plans(self):
+        self._loading = True
+        self._plans, self._cur_idx = self._read_plans(self._current_pid())
+        self._fill_saved_combo()
         self._loading = False
-        self._refresh_summary()
+        self._load_current_plan()
+
+    def _fill_saved_combo(self):
+        self.saved_combo.blockSignals(True)
+        self.saved_combo.clear()
+        for p in self._plans:
+            self.saved_combo.addItem(p.get("name", "배분방식"))
+        self.saved_combo.setCurrentIndex(self._cur_idx)
+        self.saved_combo.blockSignals(False)
+
+    def _load_current_plan(self):
+        self._loading = True
+        plan = self._plans[self._cur_idx] if self._plans else None
+        if plan:
+            self.income.blockSignals(True)
+            self.income.setValue(plan.get("income", 3000000))
+            self.income.blockSignals(False)
+            self.table.setRowCount(0)
+            self.rows = []
+            for it in plan.get("items", []):
+                self._add_row(it.get("name", ""), it.get("pct", 0), mark_custom=False)
+            self._refresh_summary()
+        self._loading = False
+
+    def _on_saved_changed(self, idx):
+        if self._loading or idx < 0 or idx >= len(self._plans):
+            return
+        self._cur_idx = idx
+        self._persist()
+        self._load_current_plan()
+
+    def _snapshot_items(self):
+        return [{"name": ne.text(), "pct": sp.value()} for ne, sp, _a in self.rows]
 
     def _save_plan(self):
-        if self._loading:
+        """현재 UI를 선택된 배분방식에 저장(자동 저장)."""
+        if self._loading or not self._plans:
             return
-        plan = {
+        cur = self._plans[self._cur_idx]
+        self._plans[self._cur_idx] = {
+            "name": cur.get("name", "배분방식"),
             "income": self.income.value(),
-            "preset": self.preset.currentText(),
-            "items": [{"name": ne.text(), "pct": sp.value()}
-                      for ne, sp, _amt in self.rows],
+            "items": self._snapshot_items(),
         }
-        db.set_setting(f"income_plan_{self._current_pid()}",
-                       json.dumps(plan, ensure_ascii=False))
+        self._persist()
+
+    def _new_plan(self):
+        n = len(self._plans) + 1
+        name, ok = QInputDialog.getText(self, "새 배분방식", "이름:", text=f"배분방식 {n}")
+        if not ok:
+            return
+        name = name.strip() or f"배분방식 {n}"
+        self._plans.append({"name": name, "income": self.income.value(),
+                            "items": self._snapshot_items()})
+        self._cur_idx = len(self._plans) - 1
+        self._persist()
+        self._fill_saved_combo()
+
+    def _rename_plan(self):
+        if not self._plans:
+            return
+        cur = self._plans[self._cur_idx]
+        name, ok = QInputDialog.getText(self, "이름 변경", "이름:", text=cur.get("name", ""))
+        if not ok:
+            return
+        cur["name"] = name.strip() or cur.get("name", "배분방식")
+        self._persist()
+        self._fill_saved_combo()
+
+    def _del_plan(self):
+        if len(self._plans) <= 1:
+            QMessageBox.information(self, "안내", "배분방식은 최소 1개는 있어야 해요.")
+            return
+        nm = self._plans[self._cur_idx].get("name", "")
+        if QMessageBox.question(self, "삭제", f"‘{nm}’ 배분방식을 삭제할까요?") \
+                != QMessageBox.Yes:
+            return
+        del self._plans[self._cur_idx]
+        self._cur_idx = min(self._cur_idx, len(self._plans) - 1)
+        self._persist()
+        self._fill_saved_combo()
+        self._load_current_plan()
 
     def _add_row(self, name, pct, mark_custom=True):
         r = self.table.rowCount()
@@ -4366,6 +4493,12 @@ class MainWindow(QMainWindow):
         return w
 
     def closeEvent(self, e):
+        # 종료 전 자산기록 자동 저장(주 창에서만, 하루 1건 덮어쓰기)
+        if not getattr(self, "is_secondary", False):
+            try:
+                self.asset_tab._save_snapshots()
+            except Exception:
+                pass
         try:
             if self in _OPEN_WINDOWS:
                 _OPEN_WINDOWS.remove(self)

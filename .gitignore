@@ -12,3 +12,6 @@ cacert.pem
 winca.pem
 crash.log
 *.spec
+
+# 스크린샷 생성 스크립트(개발용)
+_shots.py

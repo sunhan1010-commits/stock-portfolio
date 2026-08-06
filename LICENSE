@@ -1,0 +1,37 @@
+주식 포트폴리오 매니저 — 사용 허가 (License)
+Copyright (c) 2026 sunhan1010. All rights reserved.
+
+본 소프트웨어(소스 코드 및 배포되는 실행 파일 전부를 포함하며, 이하 "소프트웨어")의
+저작권은 저작권자에게 있습니다. 소프트웨어는 소스가 공개되어 있으나 오픈소스가 아니며,
+아래 조건에 동의하는 경우에 한하여 이용이 허가됩니다.
+
+1. 허용되는 것
+   - 소프트웨어를 자유롭게 내려받아 실행하고 사용할 수 있습니다.
+   - 소스 코드를 열람하고 학습 목적으로 참고할 수 있습니다.
+
+2. 금지되는 것 (저작권자의 사전 서면 허락이 없는 한)
+   - 소프트웨어 또는 그 소스 코드의 전부 또는 일부를 수정·변경·개작하는 행위.
+   - 소프트웨어 또는 그 소스 코드를(원본이든 수정본이든) 재배포·복제·전송·게시·공유·
+     판매·대여하는 행위.
+   - 소프트웨어를 기반으로 파생 저작물을 제작하여 배포·공개하는 행위.
+
+   GitHub의 기능 범위 내에서의 열람 및 포크(fork)는 허용되나, 포크하거나 내려받은
+   내용을 위 조항에 반하여 별도로 배포·공개·수정 배포하는 것은 금지됩니다.
+
+3. 무보증 및 면책
+   - 소프트웨어는 어떠한 명시적·묵시적 보증도 없이 "있는 그대로(AS IS)" 제공됩니다.
+     저작권자는 상품성, 특정 목적에의 적합성, 정확성, 비침해성을 보증하지 않습니다.
+   - 소프트웨어가 표시하는 모든 시세·지표·분석 결과는 무료 지연 데이터에 기반한
+     참고용이며, 투자 자문이나 매매 권유가 아닙니다.
+   - 소프트웨어의 사용 또는 사용 불능으로 인해 발생하는 어떠한 직접적·간접적 손해에
+     대해서도 저작권자는 책임을 지지 않습니다.
+
+문의(수정·재배포 등 별도 허락): GitHub(https://github.com/sunhan1010-commits/stock-portfolio) Issues
+
+
+────────────────────────────────────────────────────────────────────────
+English summary (the Korean text above is the governing license):
+You may download, run, and use this software for free, and view its source
+for learning. You may NOT modify, redistribute, or create and distribute
+derivative works without the copyright holder's prior written permission.
+Provided "AS IS" without warranty. Not investment advice.
