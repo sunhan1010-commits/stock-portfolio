@@ -7,7 +7,7 @@
 [Setup]
 AppId={{9E7B2C40-5B49-4363-8914-596246B624DA}
 AppName=주식 포트폴리오 매니저
-AppVersion=1.4.1
+AppVersion=1.4.2
 AppPublisher=Stock Portfolio Manager
 DefaultDirName={autopf}\StockPortfolio
 DefaultGroupName=주식 포트폴리오 매니저
