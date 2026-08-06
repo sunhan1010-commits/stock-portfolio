@@ -16,7 +16,7 @@ from PySide6.QtCore import (
     Qt, Signal, QObject, QStringListModel, QTimer, QThreadPool, QRunnable, Slot,
     QDateTime, QPointF, QMargins, QRectF,
 )
-from PySide6.QtGui import QFont, QColor, QPainter, QPen, QBrush
+from PySide6.QtGui import QFont, QColor, QPainter, QPen, QBrush, QCursor
 from PySide6.QtCharts import (
     QChart, QChartView, QLineSeries, QValueAxis, QDateTimeAxis,
     QCandlestickSeries, QCandlestickSet, QBarCategoryAxis, QAreaSeries,
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QComboBox, QDoubleSpinBox, QSpinBox, QDialog, QDialogButtonBox,
     QFormLayout, QMessageBox, QFrame, QSizePolicy, QAbstractItemView, QPlainTextEdit,
     QCompleter, QTextBrowser, QCheckBox, QSplitter, QScrollArea,
-    QToolButton, QMenu, QTabBar, QInputDialog, QStackedWidget,
+    QToolButton, QMenu, QTabBar, QInputDialog, QStackedWidget, QToolTip,
 )
 
 import datasource
@@ -2235,6 +2235,7 @@ class RealtimeTab(QWidget):
         pen.setWidth(2)
         series.setPen(pen)
         self.chart.addSeries(series)
+        _line_tip(series, getattr(self, "_view_name", "") or "현재가", _ms_to_time)
 
         axx = QDateTimeAxis()
         axx.setFormat("HH:mm")
@@ -2262,12 +2263,21 @@ class RealtimeTab(QWidget):
         series.setIncreasingColor(QColor("#cf222e"))
         series.setDecreasingColor(QColor("#1f6feb"))
         cats, lows, highs = [], [], []
+        date_by_set = {}
         for d in data:
             s = QCandlestickSet(d["open"], d["high"], d["low"], d["close"])
             series.append(s)
+            date_by_set[s] = d["date"]
             cats.append(d["date"])
             lows.append(d["low"]); highs.append(d["high"])
         self.chart.addSeries(series)
+
+        def _cand_tip(status, cset):
+            if status:
+                _tip(f"{date_by_set.get(cset, '')}\n"
+                     f"시 {cset.open():,.0f}  고 {cset.high():,.0f}\n"
+                     f"저 {cset.low():,.0f}  종 {cset.close():,.0f}")
+        series.hovered.connect(_cand_tip)
 
         axx = QBarCategoryAxis()
         axx.append(cats)
@@ -2308,6 +2318,7 @@ class RealtimeTab(QWidget):
         pen = series.pen(); pen.setColor(QColor(color_hex)); pen.setWidth(2)
         series.setPen(pen)
         self.chart.addSeries(series)
+        _line_tip(series, getattr(self, "_view_name", "") or "종가", _ms_to_date)
         axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(7)
         axx.setLabelsFont(QFont("Malgun Gothic", 8))
         self.chart.addAxis(axx, Qt.AlignBottom); series.attachAxis(axx)
@@ -2345,6 +2356,7 @@ class RealtimeTab(QWidget):
                 pen.setStyle(Qt.DashLine)
             s.setPen(pen)
             self.chart.addSeries(s); attach.append(s)
+            _line_tip(s, name, _ms_to_time if is_intraday else _ms_to_date)
             return s
 
         add_line("종가", closes, color_hex, 2)
@@ -2999,6 +3011,7 @@ class MarketTab(QWidget):
             s.append(ms, v); ys.append(v)
         pen = s.pen(); pen.setColor(QColor(color_hex)); pen.setWidth(2); s.setPen(pen)
         self.chart.addSeries(s)
+        _line_tip(s, self.item.currentText(), _ms_to_time)
         base = None
         if prev_close:
             base = QLineSeries()
@@ -3037,6 +3050,7 @@ class MarketTab(QWidget):
             s.append(ms, v); ys.append(v)
         pen = s.pen(); pen.setColor(QColor(color_hex)); pen.setWidth(2); s.setPen(pen)
         self.chart.addSeries(s)
+        _line_tip(s, self.item.currentText(), _ms_to_date)
         ax = QDateTimeAxis(); ax.setFormat("yy.MM"); ax.setTickCount(7)
         ax.setLabelsFont(QFont("Malgun Gothic", 8))
         self.chart.addAxis(ax, Qt.AlignBottom); s.attachAxis(ax)
@@ -3464,6 +3478,42 @@ _PIE_PALETTE = ["#cf222e", "#1f6feb", "#1a7f37", "#bf8700", "#8250df",
                 "#e16f24", "#0969da", "#57606a", "#d4a72c", "#6e40c9"]
 
 
+def _short(s, n=18):
+    """긴 종목명을 n자에서 …로 줄임(ETF 등 긴 이름 대응)."""
+    s = str(s or "")
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _tip(text):
+    """마우스 위치에 데이터 팝업(툴팁) 표시."""
+    QToolTip.showText(QCursor.pos(), text)
+
+
+def _bar_tip(series, items, fmt):
+    """가로/세로 막대에 hover 툴팁. items=[(name, value), ...] (막대 index 정렬)."""
+    def on(status, index, _barset):
+        if status and 0 <= index < len(items):
+            _tip(fmt(items[index][0], items[index][1]))
+    series.hovered.connect(on)
+
+
+def _line_tip(series, name, xfmt=None):
+    """라인 시리즈에 hover 툴팁."""
+    def on(point, state):
+        if state:
+            xs = (xfmt(point.x()) + " · ") if xfmt else ""
+            _tip(f"{name}\n{xs}{point.y():,.2f}")
+    series.hovered.connect(on)
+
+
+def _ms_to_date(ms):
+    return QDateTime.fromMSecsSinceEpoch(int(ms)).toString("yyyy-MM-dd")
+
+
+def _ms_to_time(ms):
+    return QDateTime.fromMSecsSinceEpoch(int(ms)).toString("MM-dd HH:mm")
+
+
 def _ret_color(ret):
     """수익률(%) -> 한국식 색(양수 빨강 / 음수 파랑). 강도에 따라 진하게."""
     if ret is None:
@@ -3478,11 +3528,13 @@ def _ret_color(ret):
 
 
 class TreemapWidget(QWidget):
-    """종목을 크기=평가액, 색=수익률로 배치하는 간단 트리맵."""
+    """종목을 크기=평가액, 색=수익률로 배치하는 간단 트리맵. 셀에 마우스 올리면 상세 팝업."""
     def __init__(self):
         super().__init__()
         self.items = []   # [{"name","value","ret"}]
+        self._rects = []  # [(QRectF, item)]
         self.setMinimumHeight(240)
+        self.setMouseTracking(True)
 
     def set_items(self, items):
         self.items = [x for x in items if (x.get("value") or 0) > 0]
@@ -3492,12 +3544,25 @@ class TreemapWidget(QWidget):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        self._rects = []
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         if not self.items:
             p.setPen(QColor("#8b949e"))
             p.drawText(rect, Qt.AlignCenter, "보유 종목이 없습니다")
             return
         self._squarify(p, list(self.items), rect)
+
+    def mouseMoveEvent(self, e):
+        pos = e.position()
+        for r, it in self._rects:
+            if r.contains(pos):
+                ret = it.get("ret")
+                rt = f"{ret:+.2f}%" if ret is not None else "-"
+                QToolTip.showText(
+                    e.globalPosition().toPoint(),
+                    f"{it['name']}\n평가액 {it['value']:,.0f}원 · 수익률 {rt}", self)
+                return
+        QToolTip.hideText()
 
     def _squarify(self, p, items, rect):
         # 단순 slice-and-dice: 면적 비례로 긴 변을 따라 분할(재귀)
@@ -3529,6 +3594,7 @@ class TreemapWidget(QWidget):
 
     def _draw_cell(self, p, it, rect):
         r = rect.adjusted(1, 1, -1, -1)
+        self._rects.append((r, it))
         p.fillRect(r, _ret_color(it.get("ret")))
         p.setPen(QPen(QColor("#ffffff"), 1)); p.drawRect(r)
         if r.width() > 46 and r.height() > 26:
@@ -3542,12 +3608,16 @@ class TreemapWidget(QWidget):
 
 
 class HeatmapWidget(QWidget):
-    """종목 간 상관계수 히트맵(정사각 셀 + 라벨)."""
+    """종목 간 상관계수 히트맵(정사각 셀 + 라벨). 셀에 마우스 올리면 값 팝업."""
+    _PAD_L = 120
+    _PAD_T = 86
+
     def __init__(self):
         super().__init__()
         self.labels = []
         self.matrix = []   # [[corr or None]]
         self.setMinimumHeight(240)
+        self.setMouseTracking(True)
 
     def set_data(self, labels, matrix):
         self.labels = labels
@@ -3563,6 +3633,13 @@ class HeatmapWidget(QWidget):
         t = min(1.0, -c)
         return QColor(int(255 - 150 * t), int(255 - 150 * t), int(255 - 90 * t))
 
+    def _cell(self):
+        n = len(self.labels)
+        if n == 0:
+            return 0
+        return max(14, min((self.width() - self._PAD_L - 6) / n,
+                           (self.height() - self._PAD_T - 6) / n))
+
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -3572,11 +3649,9 @@ class HeatmapWidget(QWidget):
             p.drawText(self.rect(), Qt.AlignCenter,
                        "상관관계를 계산할 종목이 부족합니다(2개 이상 필요)")
             return
-        pad_left = 92; pad_top = 74
-        cell = min((self.width() - pad_left - 6) / n,
-                   (self.height() - pad_top - 6) / n)
-        cell = max(14, cell)
-        f = QFont("Malgun Gothic", 7); p.setFont(f)
+        pad_left, pad_top = self._PAD_L, self._PAD_T
+        cell = self._cell()
+        p.setFont(QFont("Malgun Gothic", 7))
         for i in range(n):
             for j in range(n):
                 x = pad_left + j * cell; y = pad_top + i * cell
@@ -3588,13 +3663,100 @@ class HeatmapWidget(QWidget):
                     p.drawText(QRectF(x, y, cell, cell), Qt.AlignCenter, f"{c:.2f}")
         p.setPen(QColor("#57606a"))
         for i, lab in enumerate(self.labels):
-            p.drawText(QRectF(0, pad_top + i * cell, pad_left - 4, cell),
-                       Qt.AlignRight | Qt.AlignVCenter, lab[:8])
+            p.drawText(QRectF(2, pad_top + i * cell, pad_left - 6, cell),
+                       Qt.AlignRight | Qt.AlignVCenter, _short(lab, 12))
             p.save()
             x = pad_left + i * cell
             p.translate(x + cell / 2, pad_top - 4); p.rotate(-45)
-            p.drawText(0, 0, lab[:8])
+            p.drawText(0, 0, _short(lab, 12))
             p.restore()
+
+    def mouseMoveEvent(self, e):
+        n = len(self.labels)
+        cell = self._cell()
+        if n == 0 or cell == 0:
+            return
+        x = e.position().x() - self._PAD_L
+        y = e.position().y() - self._PAD_T
+        if x < 0 or y < 0:
+            QToolTip.hideText(); return
+        j = int(x // cell); i = int(y // cell)
+        if 0 <= i < n and 0 <= j < n:
+            c = self.matrix[i][j]
+            cs = f"{c:+.2f}" if c is not None else "-"
+            QToolTip.showText(
+                e.globalPosition().toPoint(),
+                f"{self.labels[i]}  ×  {self.labels[j]}\n상관계수 {cs}", self)
+        else:
+            QToolTip.hideText()
+
+
+_ANALYSIS_GLOSSARY = [
+    ("자산군·시장·통화 배분",
+     "내 돈이 어디에(주식/현금 등), 어느 시장(국내/해외), 어떤 통화(원/달러)에 "
+     "얼마나 나뉘어 있는지 한눈에 보는 원형 그래프예요. 한쪽에 너무 쏠려 있지 않은지 봅니다."),
+    ("집중도 (HHI)",
+     "한두 종목에 얼마나 몰빵했는지 나타내는 숫자. 낮을수록 여러 곳에 골고루 분산된 것. "
+     "0.2보다 크면 쏠림이 큰 편이에요."),
+    ("유효 종목수",
+     "겉으로는 여러 종목이어도 비중이 한쪽에 쏠리면 '실질적으로는 몇 종목에 분산된 셈'인지 알려줘요. "
+     "실제 보유 개수보다 많이 낮으면 특정 종목 의존도가 큰 겁니다."),
+    ("상위 3종목 집중도",
+     "가장 큰 3종목이 전체 자산의 몇 %를 차지하는지. 높을수록 그 몇 종목에 운명이 달려 있어요."),
+    ("트리맵",
+     "네모 하나가 종목 하나. 네모 크기 = 평가금액(클수록 많이 보유), 색 = 수익률(빨강 수익 / 파랑 손실). "
+     "무엇을 많이 들고 있고 어디서 벌고 잃는지 색·크기로 바로 보입니다."),
+    ("가중평균 PER · PBR · 배당수익률",
+     "각 종목 지표를 '보유 비중만큼' 반영해 낸 내 포트폴리오 전체의 평균값. "
+     "PER은 이익 대비 주가(낮을수록 저평가), PBR은 순자산 대비 주가, 배당수익률은 연 배당 비율이에요."),
+    ("연간 예상 배당금",
+     "지금 배당률이 그대로 유지된다고 가정할 때 1년간 받게 될 배당금 합계(현재가 기준 추정)."),
+    ("종목별 손익 기여",
+     "전체 손익에서 각 종목이 얼마를 보탰는지(빨강=수익) 깎았는지(파랑=손실). "
+     "누가 효자이고 누가 발목을 잡는지 보여줍니다."),
+    ("표준편차 (변동성) · 종합 위험도",
+     "수익률이 평균에서 얼마나 벗어나 출렁이는지가 '표준편차'이고, 이를 1년 기준으로 환산한 게 변동성(%)이에요. "
+     "높을수록 등락이 크고 위험합니다. 이 값으로 포트폴리오 종합 위험도를 "
+     "'낮음(18% 미만)·보통(18~28%)·높음(28% 초과)'으로 판정해 보여줘요."),
+    ("최대낙폭 (MDD)",
+     "고점에서 저점까지 '가장 크게 빠졌던 폭'. 이 포트폴리오를 들고 있었다면 최악의 순간에 "
+     "얼마나 떨어졌는지를 뜻해요(예: -30%면 고점 대비 30% 하락 경험)."),
+    ("샤프지수",
+     "위험(출렁임) 대비 수익을 얼마나 효율적으로 냈는지. 높을수록 '덜 흔들리며 잘 번' 것. "
+     "보통 1 이상이면 양호, 2 이상이면 우수하다고 봐요."),
+    ("베타",
+     "시장(코스피·S&P500)이 1% 움직일 때 내 포트폴리오가 몇 % 움직이는지. "
+     "1이면 시장과 같은 정도, 1보다 크면 시장보다 더 출렁이고, 작으면 더 얌전해요."),
+    ("상관계수",
+     "두 종목이 같이 움직이는 정도. 1=완전히 똑같이, 0=서로 무관, 음수=반대로 움직임. "
+     "상관이 낮은 종목끼리 담을수록 분산투자 효과(한쪽이 빠져도 다른 쪽이 버팀)가 커집니다."),
+    ("포트폴리오 vs 지수 추이",
+     "시작 시점을 똑같이 100으로 맞춰, 내 포트폴리오와 지수가 이후 어떻게 갔는지 같은 출발선에서 비교해요. "
+     "위에 있을수록 그 구간 성과가 좋았던 것(자산기록을 저장해 두면 그려집니다)."),
+]
+
+
+class AnalysisHelpDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("포트폴리오 분석 — 쉬운 설명")
+        self.resize(580, 620)
+        lay = QVBoxLayout(self)
+        intro = QLabel("각 지표가 무슨 뜻이고 어떻게 읽는지 초보자 눈높이로 정리했어요. "
+                       "숫자는 참고용이며 투자 판단·권유가 아닙니다.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        view = QTextBrowser()
+        html = ["<style>h3{margin:14px 0 3px;color:#0969da;} "
+                "p{margin:2px 0 8px;color:#333;line-height:1.5;}</style>"]
+        for name, desc in _ANALYSIS_GLOSSARY:
+            html.append(f"<h3>{name}</h3><p>{desc}</p>")
+        view.setHtml("\n".join(html))
+        view.setOpenExternalLinks(False)
+        lay.addWidget(view, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.button(QDialogButtonBox.Close).clicked.connect(self.accept)
+        lay.addWidget(bb)
 
 
 class PortfolioAnalysisTab(QWidget):
@@ -3615,6 +3777,10 @@ class PortfolioAnalysisTab(QWidget):
         self.run_btn = QPushButton("🔬 분석 실행")
         self.run_btn.clicked.connect(self._analyze)
         bar.addWidget(self.run_btn)
+        help_btn = QPushButton("ⓘ 쉬운 설명")
+        help_btn.setToolTip("HHI·샤프·베타·상관계수 등 지표를 초보자용으로 설명")
+        help_btn.clicked.connect(lambda: AnalysisHelpDialog(self).exec())
+        bar.addWidget(help_btn)
         self.status = QLabel(""); self.status.setStyleSheet("color:#8b949e;")
         bar.addWidget(self.status); bar.addStretch()
         lay.addLayout(bar)
@@ -3833,6 +3999,9 @@ class PortfolioAnalysisTab(QWidget):
             sl = s.append(f"{k} {v/tot*100:.0f}%", v)
             sl.setColor(QColor(_PIE_PALETTE[i % len(_PIE_PALETTE)]))
             sl.setLabelVisible(False)
+            sl.hovered.connect(
+                lambda state, kk=k, vv=v: _tip(
+                    f"{kk}\n{vv:,.0f}원 ({vv/tot*100:.1f}%)") if state else None)
         chart.addSeries(s)
 
     def _render_all(self, data):
@@ -3894,7 +4063,7 @@ class PortfolioAnalysisTab(QWidget):
         pos = QBarSet("수익"); neg = QBarSet("손실")
         cats = []
         for s in rows:
-            cats.append(s["name"][:8])
+            cats.append(_short(s["name"], 20))
             pos.append(s["pnl"] if s["pnl"] >= 0 else 0)
             neg.append(s["pnl"] if s["pnl"] < 0 else 0)
         pos.setColor(QColor("#cf222e")); neg.setColor(QColor("#1f6feb"))
@@ -3906,6 +4075,8 @@ class PortfolioAnalysisTab(QWidget):
         axx = QValueAxis(); axx.setLabelFormat("%,.0f")
         axx.setLabelsFont(QFont("Malgun Gothic", 8))
         ch.addAxis(axx, Qt.AlignBottom); series.attachAxis(axx)
+        _bar_tip(series, [(s["name"], s["pnl"]) for s in rows],
+                 lambda nm, v: f"{nm}\n손익 {v:+,.0f}원")
 
     def _render_risk(self, data):
         secs = data["secs"]; series_map = data["series"]
@@ -3956,33 +4127,50 @@ class PortfolioAnalysisTab(QWidget):
 
         def f(v, suf=""):
             return f"{v:.2f}{suf}" if v is not None else "-"
+
+        def risk_level(vol):
+            if vol is None:
+                return "-", "#8b949e"
+            if vol < 10:
+                return "매우 낮음", "#1a7f37"
+            if vol < 18:
+                return "낮음", "#1f6feb"
+            if vol < 28:
+                return "보통", "#bf8700"
+            if vol < 40:
+                return "높음", "#e16f24"
+            return "매우 높음", "#cf222e"
+        lvl, lcol = risk_level(vol_p)
         self.risk_label.setText(
-            f"포트폴리오 연율화 변동성 <b>{f(vol_p, '%')}</b> · "
+            f"종합 위험도 <span style='color:{lcol}; font-weight:800'>{lvl}</span> "
+            f"<span style='color:#8b949e; font-size:12px'>"
+            f"(연 변동성 {f(vol_p, '%')} 기준 · 낮음&lt;18% · 보통 18~28% · 높음&gt;28%)</span><br>"
+            f"표준편차(연율 변동성) <b>{f(vol_p, '%')}</b> · "
             f"최대낙폭(MDD) <b style='color:#1f6feb'>{f(mdd, '%')}</b> · "
             f"샤프지수 <b>{f(sharpe_v)}</b><br>"
-            f"베타 vs 코스피 <b>{f(beta_k)}</b> · vs S&P500 <b>{f(beta_s)}</b> "
+            f"베타 vs 코스피 <b>{f(beta_k)}</b> · vs S&amp;P500 <b>{f(beta_s)}</b> "
             f"<span style='color:#8b949e'>(1=지수와 동일 민감도, 높을수록 변동 큼)</span>")
         # 종목별 변동성 막대
         ch = self.vol_ch
         ch.removeAllSeries()
         for ax in list(ch.axes()):
             ch.removeAxis(ax)
-        vol_pairs.sort(key=lambda x: x[1], reverse=True)
+        vol_pairs.sort(key=lambda x: x[1])   # 가로막대는 아래→위로 커지게
         if vol_pairs:
             bs = QBarSet("변동성")
-            cats = []
+            cats = []; full = []
             for name, vv in vol_pairs:
-                cats.append(name[:8]); bs.append(vv)
+                cats.append(_short(name, 20)); full.append((name, vv)); bs.append(vv)
             bs.setColor(QColor("#bf8700"))
-            from PySide6.QtCharts import QBarSeries
-            series = QBarSeries(); series.append(bs)
+            series = QHorizontalBarSeries(); series.append(bs)
             ch.addSeries(series)
-            axx = QBarCategoryAxis(); axx.append(cats)
-            axx.setLabelsFont(QFont("Malgun Gothic", 8)); axx.setLabelsAngle(-45)
-            ch.addAxis(axx, Qt.AlignBottom); series.attachAxis(axx)
-            axy = QValueAxis(); axy.setLabelFormat("%.0f")
+            axy = QBarCategoryAxis(); axy.append(cats)
             axy.setLabelsFont(QFont("Malgun Gothic", 8))
             ch.addAxis(axy, Qt.AlignLeft); series.attachAxis(axy)
+            axx = QValueAxis(); axx.setLabelFormat("%.0f")
+            axx.setLabelsFont(QFont("Malgun Gothic", 8))
+            ch.addAxis(axx, Qt.AlignBottom); series.attachAxis(axx)
+            _bar_tip(series, full, lambda nm, v: f"{nm}\n연율 변동성 {v:.1f}%")
 
     def _render_corr(self, data):
         series_map = data["series"]
@@ -4029,6 +4217,7 @@ class PortfolioAnalysisTab(QWidget):
             pser.append(ms, val); ys.append(val)
         pen = pser.pen(); pen.setColor(QColor("#cf222e")); pen.setWidth(2); pser.setPen(pen)
         ch.addSeries(pser)
+        _line_tip(pser, "내 포트폴리오(=100 기준)", _ms_to_date)
         ally = list(ys)
         colors = {"KOSPI": "#1f6feb", "S&P500": "#1a7f37"}
         start_ymd = pts[0][0]
@@ -4045,6 +4234,7 @@ class PortfolioAnalysisTab(QWidget):
             bp = bs.pen(); bp.setColor(QColor(colors.get(key, "#8250df"))); bp.setWidth(1)
             bs.setPen(bp)
             ch.addSeries(bs)
+            _line_tip(bs, f"{key}(=100 기준)", _ms_to_date)
         axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(6)
         axx.setLabelsFont(QFont("Malgun Gothic", 8))
         ch.addAxis(axx, Qt.AlignBottom)
