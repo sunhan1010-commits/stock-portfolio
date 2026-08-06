@@ -874,6 +874,69 @@ class SellDialog(QDialog):
                 "memo": self.memo.text().strip()}
 
 
+# ============================ 매수(추가 매입) 다이얼로그 ============================
+class BuyDialog(QDialog):
+    """기존 보유 종목에 추가 매입 — 평균단가·수량을 자동 재계산."""
+    def __init__(self, parent, row, cur_price):
+        super().__init__(parent)
+        self.row = row
+        self.setWindowTitle(f"매수(추가 매입) — {row['name']}")
+        self.setMinimumWidth(380)
+        cur = row.get("currency", "KRW")
+        self.held = row.get("qty") or 0
+        self.old_avg = row.get("avg_price") or 0
+        form = QFormLayout(self)
+        form.addRow(QLabel(
+            f"현재 보유 {self.held:g}주 · 평균매입가 {fmt_money(self.old_avg, cur)}"))
+        self.qty = QDoubleSpinBox(); self.qty.setRange(0, 1e12); self.qty.setDecimals(6)
+        self.qty.valueChanged.connect(self._preview)
+        self.price = QDoubleSpinBox(); self.price.setRange(0, 1e12); self.price.setDecimals(2)
+        self.price.setGroupSeparatorShown(True)
+        self.price.setValue(cur_price or self.old_avg or 0)
+        self.price.valueChanged.connect(self._preview)
+        self.ymd = QLineEdit(QDateTime.currentDateTime().toString("yyyy-MM-dd"))
+        self.memo = QLineEdit()
+        form.addRow("매수 수량", self.qty)
+        form.addRow(f"매수 단가 ({cur})", self.price)
+        form.addRow("매수일 (YYYY-MM-DD)", self.ymd)
+        form.addRow("메모", self.memo)
+        self.preview = QLabel(""); self.preview.setTextFormat(Qt.RichText)
+        form.addRow(self.preview)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self._preview()
+
+    def _merge(self):
+        add_qty = self.qty.value(); price = self.price.value()
+        new_qty = self.held + add_qty
+        new_avg = ((self.held * self.old_avg + add_qty * price) / new_qty
+                   ) if new_qty > 0 else 0
+        return new_qty, new_avg, add_qty, price
+
+    def _preview(self):
+        cur = self.row.get("currency", "KRW")
+        new_qty, new_avg, add_qty, price = self._merge()
+        cost = add_qty * price
+        arrow = ""
+        if add_qty > 0 and self.old_avg:
+            if new_avg < self.old_avg:
+                arrow = " <span style='color:#1f6feb'>(평단 ↓ 낮아짐)</span>"
+            elif new_avg > self.old_avg:
+                arrow = " <span style='color:#cf222e'>(평단 ↑ 높아짐)</span>"
+        self.preview.setText(
+            f"매수금액 {fmt_money(cost, cur)}<br>"
+            f"<b>매수 후: {new_qty:g}주 · 평단가 {fmt_money(new_avg, cur)}</b>{arrow}")
+
+    def result(self):
+        new_qty, new_avg, add_qty, price = self._merge()
+        return {"add_qty": add_qty, "price": price,
+                "new_qty": new_qty, "new_avg": new_avg,
+                "ymd": self.ymd.text().strip() or
+                QDateTime.currentDateTime().toString("yyyy-MM-dd"),
+                "memo": self.memo.text().strip()}
+
+
 # ============================ 거래내역(실현손익) 다이얼로그 ============================
 class TransactionsDialog(QDialog):
     _COLS = ["날짜", "종목", "수량", "매입가", "매도가", "실현손익(원)"]
@@ -1070,7 +1133,8 @@ class PortfolioTab(QWidget):
         # 상단 버튼
         bar = QHBoxLayout()
         for text, fn in [("＋ 추가", self.add), ("수정", self.edit),
-                         ("삭제", self.remove), ("💰 매도", self.sell),
+                         ("삭제", self.remove),
+                         ("🛒 매수", self.buy), ("💰 매도", self.sell),
                          ("📜 거래내역", self.show_transactions),
                          ("⚖️ 리밸런싱", self.rebalance),
                          ("🔄 새로고침", self.refresh)]:
@@ -1312,6 +1376,38 @@ class PortfolioTab(QWidget):
         QMessageBox.information(
             self, "매도 기록",
             f"{row['name']} {d['qty']:g}주 매도 · 실현손익 {realized:+,.0f}원")
+
+    # --- 매수(추가 매입: 같은 종목이면 평단가·수량 재계산) ---
+    def buy(self):
+        hid = self.selected_id()
+        if hid is None:
+            QMessageBox.information(
+                self, "안내",
+                "추가 매입할 보유 종목(주식/ETF)을 선택하세요.\n"
+                "포트폴리오에 없는 새 종목은 ‘＋ 추가’를 사용하세요.")
+            return
+        row = next(r for r in self.rows if r["id"] == hid)
+        if row["kind"] not in ("주식", "ETF"):
+            QMessageBox.information(self, "안내", "주식·ETF만 매수(추가 매입)가 가능합니다.")
+            return
+        price = self.prices.get(hid) or row.get("avg_price") or 0
+        dlg = BuyDialog(self, row, price)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        d = dlg.result()
+        if d["add_qty"] <= 0:
+            QMessageBox.information(self, "안내", "매수 수량을 입력하세요.")
+            return
+        nrow = dict(row)
+        nrow["qty"] = d["new_qty"]
+        nrow["avg_price"] = d["new_avg"]
+        db.update_holding(hid, nrow)
+        self.reload()
+        cur = row.get("currency", "KRW")
+        QMessageBox.information(
+            self, "매수 반영",
+            f"{row['name']} {d['add_qty']:g}주 매수 (@ {fmt_money(d['price'], cur)})\n"
+            f"→ 총 {d['new_qty']:g}주 · 평단가 {fmt_money(d['new_avg'], cur)}")
 
     def show_transactions(self):
         TransactionsDialog(self, self.profile_id).exec()
