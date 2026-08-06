@@ -14,12 +14,13 @@ import traceback
 
 from PySide6.QtCore import (
     Qt, Signal, QObject, QStringListModel, QTimer, QThreadPool, QRunnable, Slot,
-    QDateTime, QPointF, QMargins,
+    QDateTime, QPointF, QMargins, QRectF,
 )
-from PySide6.QtGui import QFont, QColor, QPainter
+from PySide6.QtGui import QFont, QColor, QPainter, QPen, QBrush
 from PySide6.QtCharts import (
     QChart, QChartView, QLineSeries, QValueAxis, QDateTimeAxis,
     QCandlestickSeries, QCandlestickSet, QBarCategoryAxis, QAreaSeries,
+    QPieSeries, QHorizontalBarSeries, QBarSet,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
 import datasource
 import metrics
 import indicators
+import analytics
 import db
 import version
 import updater
@@ -3455,6 +3457,603 @@ class IncomeCalcTab(QWidget):
         self._save_plan()
 
 
+# ============================ 포트폴리오 분석(상세) ============================
+_PIE_PALETTE = ["#cf222e", "#1f6feb", "#1a7f37", "#bf8700", "#8250df",
+                "#e16f24", "#0969da", "#57606a", "#d4a72c", "#6e40c9"]
+
+
+def _ret_color(ret):
+    """수익률(%) -> 한국식 색(양수 빨강 / 음수 파랑). 강도에 따라 진하게."""
+    if ret is None:
+        return QColor("#8b949e")
+    if ret > 0:
+        t = min(1.0, ret / 30.0)
+        return QColor(255, int(210 - 150 * t), int(210 - 150 * t))
+    if ret < 0:
+        t = min(1.0, -ret / 30.0)
+        return QColor(int(210 - 150 * t), int(210 - 150 * t), 255)
+    return QColor("#d0d7de")
+
+
+class TreemapWidget(QWidget):
+    """종목을 크기=평가액, 색=수익률로 배치하는 간단 트리맵."""
+    def __init__(self):
+        super().__init__()
+        self.items = []   # [{"name","value","ret"}]
+        self.setMinimumHeight(240)
+
+    def set_items(self, items):
+        self.items = [x for x in items if (x.get("value") or 0) > 0]
+        self.items.sort(key=lambda x: x["value"], reverse=True)
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if not self.items:
+            p.setPen(QColor("#8b949e"))
+            p.drawText(rect, Qt.AlignCenter, "보유 종목이 없습니다")
+            return
+        self._squarify(p, list(self.items), rect)
+
+    def _squarify(self, p, items, rect):
+        # 단순 slice-and-dice: 면적 비례로 긴 변을 따라 분할(재귀)
+        total = sum(it["value"] for it in items)
+        if total <= 0 or not items:
+            return
+        if len(items) == 1:
+            self._draw_cell(p, items[0], rect)
+            return
+        # 절반 지점에서 분할
+        acc = 0.0
+        half = total / 2
+        i = 0
+        while i < len(items) - 1 and acc + items[i]["value"] < half:
+            acc += items[i]["value"]; i += 1
+        left = items[:i + 1]; right = items[i + 1:]
+        lsum = sum(x["value"] for x in left) or 1
+        frac = lsum / total
+        if rect.width() >= rect.height():
+            w = rect.width() * frac
+            r1 = QRectF(rect.left(), rect.top(), w, rect.height())
+            r2 = QRectF(rect.left() + w, rect.top(), rect.width() - w, rect.height())
+        else:
+            h = rect.height() * frac
+            r1 = QRectF(rect.left(), rect.top(), rect.width(), h)
+            r2 = QRectF(rect.left(), rect.top() + h, rect.width(), rect.height() - h)
+        self._squarify(p, left, r1)
+        self._squarify(p, right, r2)
+
+    def _draw_cell(self, p, it, rect):
+        r = rect.adjusted(1, 1, -1, -1)
+        p.fillRect(r, _ret_color(it.get("ret")))
+        p.setPen(QPen(QColor("#ffffff"), 1)); p.drawRect(r)
+        if r.width() > 46 and r.height() > 26:
+            p.setPen(QColor("#111111"))
+            f = QFont("Malgun Gothic", 8); p.setFont(f)
+            ret = it.get("ret")
+            rt = f"{ret:+.1f}%" if ret is not None else "-"
+            p.drawText(r.adjusted(4, 3, -4, -3),
+                       Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+                       f"{it['name']}\n{rt}")
+
+
+class HeatmapWidget(QWidget):
+    """종목 간 상관계수 히트맵(정사각 셀 + 라벨)."""
+    def __init__(self):
+        super().__init__()
+        self.labels = []
+        self.matrix = []   # [[corr or None]]
+        self.setMinimumHeight(240)
+
+    def set_data(self, labels, matrix):
+        self.labels = labels
+        self.matrix = matrix
+        self.update()
+
+    def _corr_color(self, c):
+        if c is None:
+            return QColor("#eaeef2")
+        if c >= 0:
+            t = min(1.0, c)
+            return QColor(int(255 - 90 * t), int(255 - 150 * t), int(255 - 150 * t))
+        t = min(1.0, -c)
+        return QColor(int(255 - 150 * t), int(255 - 150 * t), int(255 - 90 * t))
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        n = len(self.labels)
+        if n == 0:
+            p.setPen(QColor("#8b949e"))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "상관관계를 계산할 종목이 부족합니다(2개 이상 필요)")
+            return
+        pad_left = 92; pad_top = 74
+        cell = min((self.width() - pad_left - 6) / n,
+                   (self.height() - pad_top - 6) / n)
+        cell = max(14, cell)
+        f = QFont("Malgun Gothic", 7); p.setFont(f)
+        for i in range(n):
+            for j in range(n):
+                x = pad_left + j * cell; y = pad_top + i * cell
+                c = self.matrix[i][j] if i < len(self.matrix) and j < len(self.matrix[i]) else None
+                p.fillRect(QRectF(x, y, cell, cell), self._corr_color(c))
+                p.setPen(QColor("#ffffff")); p.drawRect(QRectF(x, y, cell, cell))
+                if c is not None and cell > 22:
+                    p.setPen(QColor("#111111"))
+                    p.drawText(QRectF(x, y, cell, cell), Qt.AlignCenter, f"{c:.2f}")
+        p.setPen(QColor("#57606a"))
+        for i, lab in enumerate(self.labels):
+            p.drawText(QRectF(0, pad_top + i * cell, pad_left - 4, cell),
+                       Qt.AlignRight | Qt.AlignVCenter, lab[:8])
+            p.save()
+            x = pad_left + i * cell
+            p.translate(x + cell / 2, pad_top - 4); p.rotate(-45)
+            p.drawText(0, 0, lab[:8])
+            p.restore()
+
+
+class PortfolioAnalysisTab(QWidget):
+    """전문 포트폴리오 분석기 스타일: 배분·집중도·밸류에이션·리스크·상관."""
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self._busy = False
+        lay = QVBoxLayout(self)
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("프로필"))
+        self.profile = QComboBox(); self.profile.setMinimumWidth(150)
+        bar.addWidget(self.profile)
+        bar.addWidget(QLabel("리스크 기간"))
+        self.period = QComboBox(); self.period.addItems(["6개월", "1년", "3년"])
+        self.period.setCurrentText("1년")
+        bar.addWidget(self.period)
+        self.run_btn = QPushButton("🔬 분석 실행")
+        self.run_btn.clicked.connect(self._analyze)
+        bar.addWidget(self.run_btn)
+        self.status = QLabel(""); self.status.setStyleSheet("color:#8b949e;")
+        bar.addWidget(self.status); bar.addStretch()
+        lay.addLayout(bar)
+
+        self.sub = QTabWidget()
+        self.sub.addTab(self._build_alloc(), "배분·집중도")
+        self.sub.addTab(self._build_value(), "밸류에이션·배당")
+        self.sub.addTab(self._build_risk(), "리스크")
+        self.sub.addTab(self._build_corr(), "상관·성과")
+        lay.addWidget(self.sub, 1)
+        note = QLabel("※ 참고용 분석이며 투자권유가 아닙니다. 리스크·상관은 종목별 시세 이력으로 "
+                      "계산해 수십 초 걸릴 수 있고, 시세/데이터가 없는 종목은 제외됩니다.")
+        note.setWordWrap(True); note.setStyleSheet("color:#8b949e; font-size:11px;")
+        lay.addWidget(note)
+        self._loaded = False
+
+    # ---- 페이지 구성 ----
+    def _pie_view(self):
+        ch = QChart(); ch.legend().setVisible(True)
+        ch.legend().setAlignment(Qt.AlignRight)
+        ch.legend().setFont(QFont("Malgun Gothic", 8))
+        ch.setMargins(QMargins(0, 0, 0, 0))
+        v = QChartView(ch); v.setRenderHint(QPainter.Antialiasing)
+        v.setMinimumHeight(200)
+        return ch, v
+
+    def _build_alloc(self):
+        w = QWidget(); v = QVBoxLayout(w)
+        row = QHBoxLayout()
+        self.pie_kind_ch, kv = self._pie_view()
+        self.pie_mkt_ch, mv = self._pie_view()
+        self.pie_cur_ch, cv = self._pie_view()
+        for cap, view in (("자산군", kv), ("시장", mv), ("통화", cv)):
+            box = QVBoxLayout(); t = QLabel(cap)
+            t.setAlignment(Qt.AlignCenter); t.setStyleSheet("font-weight:700;")
+            box.addWidget(t); box.addWidget(view)
+            row.addLayout(box)
+        v.addLayout(row)
+        self.conc_label = QLabel("‘분석 실행’을 누르세요.")
+        self.conc_label.setTextFormat(Qt.RichText)
+        self.conc_label.setStyleSheet(
+            "background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:8px;")
+        v.addWidget(self.conc_label)
+        v.addWidget(QLabel("종목 구성(크기=평가액, 색=수익률 · 빨강 수익/파랑 손실)"))
+        self.treemap = TreemapWidget()
+        v.addWidget(self.treemap, 1)
+        return w
+
+    def _build_value(self):
+        w = QWidget(); v = QVBoxLayout(w)
+        self.val_label = QLabel("‘분석 실행’을 누르세요.")
+        self.val_label.setTextFormat(Qt.RichText)
+        self.val_label.setStyleSheet(
+            "background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:10px;")
+        v.addWidget(self.val_label)
+        v.addWidget(QLabel("종목별 손익 기여(원, KRW) — 빨강 수익 / 파랑 손실"))
+        self.contrib_ch = QChart(); self.contrib_ch.legend().hide()
+        self.contrib_ch.setMargins(QMargins(4, 4, 4, 4))
+        self.contrib_view = QChartView(self.contrib_ch)
+        self.contrib_view.setRenderHint(QPainter.Antialiasing)
+        v.addWidget(self.contrib_view, 1)
+        return w
+
+    def _build_risk(self):
+        w = QWidget(); v = QVBoxLayout(w)
+        self.risk_label = QLabel("‘분석 실행’을 누르세요.")
+        self.risk_label.setTextFormat(Qt.RichText)
+        self.risk_label.setStyleSheet(
+            "background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:10px;")
+        v.addWidget(self.risk_label)
+        v.addWidget(QLabel("종목별 연율화 변동성(%) — 높을수록 가격 흔들림이 큼"))
+        self.vol_ch = QChart(); self.vol_ch.legend().hide()
+        self.vol_ch.setMargins(QMargins(4, 4, 4, 4))
+        self.vol_view = QChartView(self.vol_ch)
+        self.vol_view.setRenderHint(QPainter.Antialiasing)
+        v.addWidget(self.vol_view, 1)
+        return w
+
+    def _build_corr(self):
+        w = QWidget(); v = QVBoxLayout(w)
+        v.addWidget(QLabel("종목 간 상관계수(1=같이 움직임 · 0=무관 · 음수=반대). "
+                           "낮을수록 분산투자 효과가 큼"))
+        self.heatmap = HeatmapWidget()
+        v.addWidget(self.heatmap, 1)
+        v.addWidget(QLabel("포트폴리오 가치 추이 vs 지수(자산기록 기준·100 정규화)"))
+        self.perf_ch = QChart(); self.perf_ch.legend().setVisible(True)
+        self.perf_ch.legend().setAlignment(Qt.AlignBottom)
+        self.perf_ch.setMargins(QMargins(4, 4, 4, 4))
+        self.perf_view = QChartView(self.perf_ch)
+        self.perf_view.setRenderHint(QPainter.Antialiasing)
+        v.addWidget(self.perf_view, 1)
+        return w
+
+    # ---- 로드 / 분석 ----
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._rebuild_profiles()
+
+    def _rebuild_profiles(self):
+        prev = self.profile.currentData()
+        self.profile.blockSignals(True); self.profile.clear()
+        for p in db.list_profiles():
+            self.profile.addItem(p["name"], p["id"])
+        idx = self.profile.findData(prev if prev is not None else self.main.active_profile_id())
+        if idx >= 0:
+            self.profile.setCurrentIndex(idx)
+        self.profile.blockSignals(False)
+
+    def _pid(self):
+        d = self.profile.currentData()
+        return d if d is not None else self.main.active_profile_id()
+
+    def _analyze(self):
+        if self._busy:
+            return
+        self._busy = True
+        self.run_btn.setEnabled(False)
+        self.status.setText("분석 중… (시세·이력 조회, 수십 초 걸릴 수 있어요)")
+        pid = self._pid()
+        period = self.period.currentText()
+
+        def job():
+            return self._gather(pid, period)
+
+        def done(data):
+            self._busy = False
+            self.run_btn.setEnabled(True)
+            self.status.setText(f"분석 완료 · 종목 {data['n_sec']}개 / 자산 {data['n_all']}개")
+            try:
+                self._render_all(data)
+            except Exception as ex:
+                self.status.setText(f"표시 오류: {ex}")
+
+        def fail(msg):
+            self._busy = False
+            self.run_btn.setEnabled(True)
+            self.status.setText(f"분석 실패: {msg}")
+        run_async(self, job, done, fail)
+
+    def _gather(self, pid, period):
+        holdings = db.list_holdings(pid)
+        curs = {h.get("currency") or "KRW" for h in holdings}
+        rates = datasource.fx_rates(curs)
+
+        def rate(cur):
+            if not cur or cur == "KRW":
+                return 1.0
+            return rates.get(cur) or datasource._FX_FALLBACK.get(cur, 1.0)
+
+        assets = []      # 전체(배분용)
+        secs = []        # 주식/ETF(밸류·리스크·상관용)
+        series_map = {}
+        for h in holdings:
+            if not h.get("included", 1):
+                continue
+            cur = h.get("currency") or "KRW"
+            kind = h["kind"]
+            if kind in ("주식", "ETF"):
+                price = None; quote = None
+                try:
+                    price = datasource.live_price(h["market"], h["code"]).get("price")
+                except Exception:
+                    pass
+                try:
+                    quote = datasource.quote_for(h["market"], h["code"])
+                except Exception:
+                    quote = None
+                if price is None and quote:
+                    price = quote.get("price")
+                price = price or h.get("avg_price") or 0
+                val_krw = (h.get("qty") or 0) * price * rate(cur)
+                cost_krw = (h.get("qty") or 0) * (h.get("avg_price") or 0) * rate(cur)
+                ret = ((val_krw / cost_krw - 1) * 100) if cost_krw > 0 else None
+                rec = {"name": h["name"], "market": h.get("market"),
+                       "code": h["code"], "kind": kind, "currency": cur,
+                       "value": val_krw, "cost": cost_krw, "ret": ret,
+                       "pnl": val_krw - cost_krw,
+                       "per": (quote or {}).get("per"), "pbr": (quote or {}).get("pbr"),
+                       "div": (quote or {}).get("div_yield"),
+                       "beta": (quote or {}).get("beta"),
+                       "sector": (quote or {}).get("sector") or "기타",
+                       "price": price}
+                secs.append(rec); assets.append(rec)
+                try:
+                    hist = datasource.history(h["market"], h["code"], period)
+                    if hist:
+                        series_map[h["name"]] = [(d["date"], d["close"]) for d in hist]
+                except Exception:
+                    pass
+            else:
+                val_krw = (h.get("amount") or 0) * rate(cur)
+                assets.append({"name": h["name"], "kind": kind, "currency": cur,
+                               "value": val_krw, "ret": None, "market": "KR"})
+
+        # 벤치마크 지수 이력
+        bench = {}
+        try:
+            bench["KOSPI"] = datasource.index_history("KOSPI", period)
+        except Exception:
+            pass
+        try:
+            bench["S&P500"] = datasource.index_history("S&P500", period)
+        except Exception:
+            pass
+        snaps = db.list_snapshots(pid)
+        return {"assets": assets, "secs": secs, "series": series_map,
+                "bench": bench, "snaps": snaps,
+                "n_sec": len(secs), "n_all": len(assets), "period": period}
+
+    # ---- 렌더 ----
+    def _fill_pie(self, chart, pairs):
+        chart.removeAllSeries()
+        s = QPieSeries(); s.setHoleSize(0.45)
+        tot = sum(v for _, v in pairs) or 1
+        for i, (k, v) in enumerate(pairs):
+            sl = s.append(f"{k} {v/tot*100:.0f}%", v)
+            sl.setColor(QColor(_PIE_PALETTE[i % len(_PIE_PALETTE)]))
+            sl.setLabelVisible(False)
+        chart.addSeries(s)
+
+    def _render_all(self, data):
+        assets = data["assets"]; secs = data["secs"]
+        # --- 배분 ---
+        self._fill_pie(self.pie_kind_ch,
+                       analytics.group_sum(assets, lambda x: x["kind"], lambda x: x["value"]))
+        self._fill_pie(self.pie_mkt_ch,
+                       analytics.group_sum(assets, lambda x: ("국내" if x.get("market") == "KR" else "해외"),
+                                           lambda x: x["value"]))
+        self._fill_pie(self.pie_cur_ch,
+                       analytics.group_sum(assets, lambda x: x.get("currency") or "KRW",
+                                           lambda x: x["value"]))
+        vals = [a["value"] for a in assets]
+        top3 = analytics.top_concentration(vals, 3)
+        hh = analytics.hhi(vals)
+        eff = analytics.effective_holdings(vals)
+        tot = sum(vals) or 0
+        # 섹터(주식/ETF 기준)
+        sec_alloc = analytics.group_sum(secs, lambda x: x.get("sector") or "기타",
+                                        lambda x: x["value"])
+        sec_txt = " · ".join(f"{k} {v/(sum(s['value'] for s in secs) or 1)*100:.0f}%"
+                             for k, v in sec_alloc[:5]) if secs else "-"
+        self.conc_label.setText(
+            f"총 평가액 <b>{tot:,.0f}원</b> · 자산 {len(assets)}개<br>"
+            f"상위 3종목 집중도 <b>{top3:.0f}%</b> · HHI <b>{hh:.3f}</b> · "
+            f"유효 종목수 <b>{eff:.1f}</b><br>"
+            f"<span style='color:#57606a'>섹터: {sec_txt}</span>")
+        self.treemap.set_items([{"name": s["name"], "value": s["value"], "ret": s["ret"]}
+                                for s in secs])
+
+        # --- 밸류에이션·배당 ---
+        wper = analytics.weighted_average([(s["value"], s["per"]) for s in secs])
+        wpbr = analytics.weighted_average([(s["value"], s["pbr"]) for s in secs])
+        wdiv = analytics.weighted_average([(s["value"], s["div"]) for s in secs])
+        annual_div = sum((s["value"] * (s["div"] or 0) / 100) for s in secs)
+        def fmtm(v, suf=""):
+            return f"{v:.2f}{suf}" if v is not None else "-"
+        self.val_label.setText(
+            f"가중평균 <b>PER {fmtm(wper)}</b> · <b>PBR {fmtm(wpbr)}</b> · "
+            f"<b>배당수익률 {fmtm(wdiv, '%')}</b><br>"
+            f"연간 예상 배당금(현재가 기준) <b style='color:#1a7f37'>{annual_div:,.0f}원</b> "
+            f"<span style='color:#8b949e'>(월 {annual_div/12:,.0f}원)</span>")
+        self._bar_contrib(secs)
+
+        # --- 리스크 ---
+        self._render_risk(data)
+        # --- 상관·성과 ---
+        self._render_corr(data)
+
+    def _bar_contrib(self, secs):
+        ch = self.contrib_ch
+        ch.removeAllSeries()
+        for ax in list(ch.axes()):
+            ch.removeAxis(ax)
+        rows = sorted(secs, key=lambda s: s["pnl"])
+        if not rows:
+            return
+        pos = QBarSet("수익"); neg = QBarSet("손실")
+        cats = []
+        for s in rows:
+            cats.append(s["name"][:8])
+            pos.append(s["pnl"] if s["pnl"] >= 0 else 0)
+            neg.append(s["pnl"] if s["pnl"] < 0 else 0)
+        pos.setColor(QColor("#cf222e")); neg.setColor(QColor("#1f6feb"))
+        series = QHorizontalBarSeries(); series.append(pos); series.append(neg)
+        ch.addSeries(series)
+        axy = QBarCategoryAxis(); axy.append(cats)
+        axy.setLabelsFont(QFont("Malgun Gothic", 8))
+        ch.addAxis(axy, Qt.AlignLeft); series.attachAxis(axy)
+        axx = QValueAxis(); axx.setLabelFormat("%,.0f")
+        axx.setLabelsFont(QFont("Malgun Gothic", 8))
+        ch.addAxis(axx, Qt.AlignBottom); series.attachAxis(axx)
+
+    def _render_risk(self, data):
+        secs = data["secs"]; series_map = data["series"]
+        bench = data["bench"]
+        # 종목별 수익률
+        rmap = {}
+        vol_pairs = []
+        for name, s in series_map.items():
+            closes = [c for _, c in s]
+            r = analytics.daily_returns(closes)
+            if len(r) >= 20:
+                rmap[name] = (s, r)
+                vol_pairs.append((name, analytics.volatility(r)))
+        # 포트폴리오(가중) 일간수익률 — 공통 날짜로 정렬
+        val_by_name = {s["name"]: s["value"] for s in secs}
+        used = {n: series_map[n] for n in rmap if n in series_map}
+        port_ret, dates = [], []
+        mdd = None; sharpe_v = None; vol_p = None
+        beta_k = beta_s = None
+        if used:
+            dates, aligned = analytics.align_by_date(used)
+            if len(dates) >= 20:
+                wsum = sum(val_by_name.get(n, 0) for n in aligned) or 1
+                w = {n: val_by_name.get(n, 0) / wsum for n in aligned}
+                closes_port = []
+                for i in range(len(dates)):
+                    closes_port.append(sum(aligned[n][i] * w[n] for n in aligned))
+                port_ret = analytics.daily_returns(closes_port)
+                vol_p = analytics.volatility(port_ret)
+                mdd = analytics.max_drawdown(closes_port)
+                sharpe_v = analytics.sharpe(port_ret)
+                # 베타(정렬된 벤치마크와 교집합)
+                for key, dst in (("KOSPI", "k"), ("S&P500", "s")):
+                    b = bench.get(key)
+                    if not b:
+                        continue
+                    merged = analytics.align_by_date({"p": [(dates[i], closes_port[i]) for i in range(len(dates))],
+                                                      "b": b})
+                    d2, al = merged
+                    if len(d2) >= 20:
+                        pr = analytics.daily_returns(al["p"])
+                        br = analytics.daily_returns(al["b"])
+                        bv = analytics.beta(pr, br)
+                        if dst == "k":
+                            beta_k = bv
+                        else:
+                            beta_s = bv
+
+        def f(v, suf=""):
+            return f"{v:.2f}{suf}" if v is not None else "-"
+        self.risk_label.setText(
+            f"포트폴리오 연율화 변동성 <b>{f(vol_p, '%')}</b> · "
+            f"최대낙폭(MDD) <b style='color:#1f6feb'>{f(mdd, '%')}</b> · "
+            f"샤프지수 <b>{f(sharpe_v)}</b><br>"
+            f"베타 vs 코스피 <b>{f(beta_k)}</b> · vs S&P500 <b>{f(beta_s)}</b> "
+            f"<span style='color:#8b949e'>(1=지수와 동일 민감도, 높을수록 변동 큼)</span>")
+        # 종목별 변동성 막대
+        ch = self.vol_ch
+        ch.removeAllSeries()
+        for ax in list(ch.axes()):
+            ch.removeAxis(ax)
+        vol_pairs.sort(key=lambda x: x[1], reverse=True)
+        if vol_pairs:
+            bs = QBarSet("변동성")
+            cats = []
+            for name, vv in vol_pairs:
+                cats.append(name[:8]); bs.append(vv)
+            bs.setColor(QColor("#bf8700"))
+            from PySide6.QtCharts import QBarSeries
+            series = QBarSeries(); series.append(bs)
+            ch.addSeries(series)
+            axx = QBarCategoryAxis(); axx.append(cats)
+            axx.setLabelsFont(QFont("Malgun Gothic", 8)); axx.setLabelsAngle(-45)
+            ch.addAxis(axx, Qt.AlignBottom); series.attachAxis(axx)
+            axy = QValueAxis(); axy.setLabelFormat("%.0f")
+            axy.setLabelsFont(QFont("Malgun Gothic", 8))
+            ch.addAxis(axy, Qt.AlignLeft); series.attachAxis(axy)
+
+    def _render_corr(self, data):
+        series_map = data["series"]
+        # 상관 히트맵(수익률 20개 이상 종목만)
+        rets = {}
+        for name, s in series_map.items():
+            r = analytics.daily_returns([c for _, c in s])
+            if len(r) >= 20:
+                rets[name] = s
+        names = list(rets.keys())
+        if len(names) >= 2:
+            _dts, aligned = analytics.align_by_date(rets)
+            ar = {n: analytics.daily_returns(aligned[n]) for n in names}
+            matrix = []
+            for i in names:
+                row = []
+                for j in names:
+                    row.append(analytics.correlation(ar[i], ar[j]))
+                matrix.append(row)
+            self.heatmap.set_data(names, matrix)
+        else:
+            self.heatmap.set_data([], [])
+        # 성과 추이(자산기록 vs 지수)
+        self._render_perf(data)
+
+    def _render_perf(self, data):
+        ch = self.perf_ch
+        ch.removeAllSeries()
+        for ax in list(ch.axes()):
+            ch.removeAxis(ax)
+        snaps = data["snaps"]
+        pts = [(s["ymd"], s.get("total") or 0) for s in snaps if (s.get("total") or 0) > 0]
+        if len(pts) < 2:
+            ch.setTitle("자산기록이 2개 이상이면 포트폴리오 추이를 그립니다(자산기록 탭에서 저장)")
+            ch.setTitleFont(QFont("Malgun Gothic", 8))
+            return
+        ch.setTitle("")
+        base = pts[0][1] or 1
+        pser = QLineSeries(); pser.setName("내 포트폴리오")
+        ys = []
+        for ymd, v in pts:
+            ms = QDateTime.fromString(ymd, "yyyy-MM-dd").toMSecsSinceEpoch()
+            val = v / base * 100
+            pser.append(ms, val); ys.append(val)
+        pen = pser.pen(); pen.setColor(QColor("#cf222e")); pen.setWidth(2); pser.setPen(pen)
+        ch.addSeries(pser)
+        ally = list(ys)
+        colors = {"KOSPI": "#1f6feb", "S&P500": "#1a7f37"}
+        start_ymd = pts[0][0]
+        for key, b in data["bench"].items():
+            b2 = [(d, c) for d, c in b if d >= start_ymd]
+            if len(b2) < 2:
+                continue
+            bbase = b2[0][1] or 1
+            bs = QLineSeries(); bs.setName(key)
+            for d, c in b2:
+                ms = QDateTime.fromString(d, "yyyy-MM-dd").toMSecsSinceEpoch()
+                yv = c / bbase * 100
+                bs.append(ms, yv); ally.append(yv)
+            bp = bs.pen(); bp.setColor(QColor(colors.get(key, "#8250df"))); bp.setWidth(1)
+            bs.setPen(bp)
+            ch.addSeries(bs)
+        axx = QDateTimeAxis(); axx.setFormat("yy.MM"); axx.setTickCount(6)
+        axx.setLabelsFont(QFont("Malgun Gothic", 8))
+        ch.addAxis(axx, Qt.AlignBottom)
+        axy = QValueAxis(); axy.setLabelsFont(QFont("Malgun Gothic", 8))
+        lo, hi = min(ally), max(ally); pad = (hi - lo) * 0.08 or 1
+        axy.setRange(lo - pad, hi + pad)
+        ch.addAxis(axy, Qt.AlignLeft)
+        for s in ch.series():
+            s.attachAxis(axx); s.attachAxis(axy)
+
+
 # ============================ 메인 윈도우 ============================
 _OPEN_WINDOWS = []   # 보조 창 참조 유지(GC 방지)
 
@@ -3483,8 +4082,10 @@ class MainWindow(QMainWindow):
         self.market_tab = MarketTab(self)
         self.asset_tab = AssetHistoryTab(self)
         self.income_tab = IncomeCalcTab(self)
+        self.analysis_tab = PortfolioAnalysisTab(self)
         # 항상 유지되는(닫기 불가) 탭들 — 프로필 탭 뒤에 배치
         self._persistent = [
+            (self.analysis_tab, "  포트폴리오 분석  "),
             (self.screener_tab, "  스크리너  "),
             (self.market_tab, "  시장지표  "),
             (self.asset_tab, "  자산기록  "),
