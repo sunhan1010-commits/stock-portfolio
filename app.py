@@ -2543,6 +2543,9 @@ class ScreenerTab(QWidget):
         self.data = []       # 불러온 재무 리스트
         self._busy = False
         self._sectors = []
+        self._fp = []        # 현재 프로필의 필터 프리셋 목록
+        self._fp_idx = 0
+        self._fp_loading = False
         lay = QVBoxLayout(self)
 
         # 유니버스 선택
@@ -2588,6 +2591,26 @@ class ScreenerTab(QWidget):
         f.addWidget(self.count_label)
         lay.addLayout(f)
 
+        # 내 필터(프로필별 저장) — 커스텀 프리셋
+        pf = QHBoxLayout()
+        pf.addWidget(QLabel("내 필터"))
+        self.filter_combo = QComboBox(); self.filter_combo.setMinimumWidth(150)
+        self.filter_combo.currentIndexChanged.connect(self._fp_on_changed)
+        pf.addWidget(self.filter_combo)
+        nb = QPushButton("＋ 새로"); nb.setToolTip("현재 필터 조건을 새 필터로 저장(프로필별)")
+        nb.clicked.connect(self._fp_new)
+        rb = QPushButton("✎ 이름"); rb.clicked.connect(self._fp_rename)
+        xb = QPushButton("🗑"); xb.clicked.connect(self._fp_del)
+        pf.addWidget(nb); pf.addWidget(rb); pf.addWidget(xb)
+        pf.addStretch()
+        self.fp_hint = QLabel("필터 조건은 프로필별로 자동 저장됩니다.")
+        self.fp_hint.setStyleSheet("color:#8b949e; font-size:11px;")
+        pf.addWidget(self.fp_hint)
+        lay.addLayout(pf)
+        # 시장·개수 변경도 필터에 반영·저장
+        self.market.currentTextChanged.connect(lambda *_: self._fp_save_current())
+        self.count.currentTextChanged.connect(lambda *_: self._fp_save_current())
+
         self.status = QLabel("‘종목 불러오기’로 조건 검색을 시작하세요. "
                              "(섹터를 고르면 그 업종만 빠르게, ‘전체’는 시총상위 N개)")
         self.status.setStyleSheet("color:#8b949e; font-size:11px;")
@@ -2626,6 +2649,123 @@ class ScreenerTab(QWidget):
         self.sector.setEnabled(not is_us)
         self.count.setEnabled(not is_us)
 
+    # --- 내 필터(프로필별 커스텀 프리셋) ---
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._fp_reload()
+
+    def _pid(self):
+        return self.main.active_profile_id()
+
+    def _fp_snapshot(self):
+        return {"market": self.market.currentText(), "count": self.count.currentText(),
+                "per": self.f_per.value(), "pbr": self.f_pbr.value(),
+                "roe": self.f_roe.value(), "div": self.f_div.value(),
+                "cap": self.f_cap.value()}
+
+    def _fp_default(self, name):
+        d = self._fp_snapshot(); d["name"] = name
+        return d
+
+    def _fp_read(self, pid):
+        raw = db.get_setting(f"screener_filters_{pid}")
+        if raw:
+            try:
+                d = json.loads(raw); ps = d.get("presets") or []
+                if ps:
+                    cur = max(0, min(int(d.get("current", 0)), len(ps) - 1))
+                    return ps, cur
+            except Exception:
+                pass
+        return [self._fp_default("필터 1")], 0
+
+    def _fp_persist(self):
+        db.set_setting(f"screener_filters_{self._pid()}",
+                       json.dumps({"presets": self._fp, "current": self._fp_idx},
+                                  ensure_ascii=False))
+
+    def _fp_reload(self):
+        self._fp_loading = True
+        self._fp, self._fp_idx = self._fp_read(self._pid())
+        self.filter_combo.blockSignals(True)
+        self.filter_combo.clear()
+        for p in self._fp:
+            self.filter_combo.addItem(p.get("name", "필터"))
+        self.filter_combo.setCurrentIndex(self._fp_idx)
+        self.filter_combo.blockSignals(False)
+        self._fp_apply(self._fp[self._fp_idx])
+        self._fp_loading = False
+
+    def _fp_apply(self, p):
+        widgets = (self.market, self.count, self.f_per, self.f_pbr,
+                   self.f_roe, self.f_div, self.f_cap)
+        for w in widgets:
+            w.blockSignals(True)
+        self.market.setCurrentText(p.get("market", "전체(국내)"))
+        self.count.setCurrentText(str(p.get("count", "100")))
+        self.f_per.setValue(p.get("per", 0)); self.f_pbr.setValue(p.get("pbr", 0))
+        self.f_roe.setValue(p.get("roe", 0)); self.f_div.setValue(p.get("div", 0))
+        self.f_cap.setValue(p.get("cap", 0))
+        for w in widgets:
+            w.blockSignals(False)
+        self._on_market_changed(self.market.currentText())
+        self._apply()
+
+    def _fp_save_current(self):
+        if self._fp_loading or not self._fp:
+            return
+        name = self._fp[self._fp_idx].get("name", "필터")
+        d = self._fp_snapshot(); d["name"] = name
+        self._fp[self._fp_idx] = d
+        self._fp_persist()
+
+    def _fp_on_changed(self, idx):
+        if self._fp_loading or idx < 0 or idx >= len(self._fp):
+            return
+        self._fp_idx = idx
+        self._fp_loading = True
+        self._fp_apply(self._fp[idx])
+        self._fp_loading = False
+        self._fp_persist()
+
+    def _fp_new(self):
+        n = len(self._fp) + 1
+        name, ok = QInputDialog.getText(self, "새 필터", "이름:", text=f"필터 {n}")
+        if not ok:
+            return
+        name = name.strip() or f"필터 {n}"
+        self._fp.append(self._fp_default(name))
+        self._fp_idx = len(self._fp) - 1
+        self._fp_persist()
+        self.filter_combo.blockSignals(True)
+        self.filter_combo.addItem(name)
+        self.filter_combo.setCurrentIndex(self._fp_idx)
+        self.filter_combo.blockSignals(False)
+        self.fp_hint.setText(f"‘{name}’로 저장됨 · 조건을 바꾸면 자동 저장돼요.")
+
+    def _fp_rename(self):
+        if not self._fp:
+            return
+        cur = self._fp[self._fp_idx]
+        name, ok = QInputDialog.getText(self, "이름 변경", "이름:", text=cur.get("name", ""))
+        if not ok:
+            return
+        cur["name"] = name.strip() or cur.get("name", "필터")
+        self._fp_persist()
+        self.filter_combo.setItemText(self._fp_idx, cur["name"])
+
+    def _fp_del(self):
+        if len(self._fp) <= 1:
+            QMessageBox.information(self, "안내", "필터는 최소 1개는 있어야 해요.")
+            return
+        nm = self._fp[self._fp_idx].get("name", "")
+        if QMessageBox.question(self, "삭제", f"‘{nm}’ 필터를 삭제할까요?") != QMessageBox.Yes:
+            return
+        del self._fp[self._fp_idx]
+        self._fp_idx = min(self._fp_idx, len(self._fp) - 1)
+        self._fp_persist()
+        self._fp_reload()
+
     def _load(self):
         if self._busy:
             return
@@ -2662,6 +2802,7 @@ class ScreenerTab(QWidget):
         run_async(self, job, done, fail)
 
     def _apply(self):
+        self._fp_save_current()   # 조건 변경 시 현재 필터에 자동 저장
         per_max = self.f_per.value() or None
         pbr_max = self.f_pbr.value() or None
         roe_min = self.f_roe.value() or None
